@@ -16,6 +16,11 @@ import { aggregateCandles } from "./lib/timeframe";
 
 const PAIRS = ["USD/JPY", "EUR/USD", "GBP/USD", "EUR/GBP", "GBP/JPY", "EUR/JPY"];
 
+const MAIN_DURATION = 1;
+const MAIN_DURATION_UNIT = "m" as const;
+const MIN_CONFIDENCE = 75;
+const SAME_SIGNAL_COOLDOWN_MS = 5 * 60 * 1000;
+
 function normalizeSymbol(symbol: string) {
   return symbol;
 }
@@ -244,7 +249,7 @@ export default function Home() {
         (atr > 0 ? 5 : 0)
     );
 
-    if (highScore >= 75 && highScore >= lowScore) {
+    if (highScore >= MIN_CONFIDENCE && highScore >= lowScore) {
       return {
         signal: "HIGH" as Signal,
         confidence: highScore,
@@ -257,7 +262,7 @@ export default function Home() {
       };
     }
 
-    if (lowScore >= 75 && lowScore > highScore) {
+    if (lowScore >= MIN_CONFIDENCE && lowScore > highScore) {
       return {
         signal: "LOW" as Signal,
         confidence: lowScore,
@@ -306,14 +311,14 @@ export default function Home() {
     const signal = signalResult.signal;
 
     if (signal !== "HIGH" && signal !== "LOW") return;
-    if (signalResult.confidence < 60) return;
+    if (signalResult.confidence < MIN_CONFIDENCE) return;
     if (inFlightRef.current) return;
 
     const key = `${selectedPair}-${signal}`;
     const now = Date.now();
     const lastAt = lastEntryRef.current[key] ?? 0;
 
-    if (now - lastAt < 5 * 60 * 1000) {
+    if (now - lastAt < SAME_SIGNAL_COOLDOWN_MS) {
       setLastEngineResult({
         stage: "cooldown_skip",
         message: "同一シグナル5分クールダウン中",
@@ -335,9 +340,9 @@ export default function Home() {
           direction: signal,
           score: signalResult.confidence,
           amount: 1,
-          duration: 5,
-          durationUnit: "m",
-          minConfidence: 60,
+          duration: MAIN_DURATION,
+          durationUnit: MAIN_DURATION_UNIT,
+          minConfidence: MIN_CONFIDENCE,
           features: {
             source,
             timeframe: "1m",
@@ -357,6 +362,8 @@ export default function Home() {
             liquidity:
               signal === "HIGH" ? smc.liquidityBull : smc.liquidityBear,
             smcScore,
+            backtest1mWinRate: stats1m.winRate,
+            backtest3mWinRate: stats3m.winRate,
           },
         }),
       });
@@ -413,6 +420,8 @@ export default function Home() {
     rci52,
     atr,
     smc,
+    stats1m.winRate,
+    stats3m.winRate,
   ]);
 
   const signalColor =
@@ -444,6 +453,7 @@ export default function Home() {
           <div className="flex flex-wrap gap-2">
             <Pill label="1分足 Main" active />
             <Pill label="3分足 Reference" active={false} />
+            <Pill label={`${MAIN_DURATION}分Demo`} active />
             <Pill label="AUTO" active={autoTradeEnabled} />
           </div>
         </div>
@@ -494,6 +504,8 @@ export default function Home() {
                   value={engineRunning ? "実行中" : "待機中"}
                   tone={engineRunning ? "warn" : "good"}
                 />
+                <Stat label="Demo時間" value={`${MAIN_DURATION}分`} tone="good" />
+                <Stat label="最小Confidence" value={MIN_CONFIDENCE} tone="info" />
                 <Stat label="価格" value={price} />
                 <Stat label="ATR" value={atr.toFixed(5)} />
               </div>
