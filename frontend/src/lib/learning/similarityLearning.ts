@@ -1,10 +1,12 @@
 import { getSimilarityTradeCandidates } from "@/lib/db/tradeRepository";
+import type { TradeFeatureSnapshot } from "@/lib/db/tradeRepository";
 
 export type SimilarityLearningInput = {
   pair: string;
   direction: "HIGH" | "LOW";
   score: number;
   payoutRate: number | null;
+  features?: TradeFeatureSnapshot | null;
 };
 
 export type SimilarityLearningResult = {

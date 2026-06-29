@@ -48,11 +48,12 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
   });
 
   const similarity = applySimilarityLearning({
-    pair: input.pair,
-    direction: input.direction,
-    score: learning.adjustedScore,
-    payoutRate: null,
-  });
+  pair: input.pair,
+  direction: input.direction,
+  score: learning.adjustedScore,
+  payoutRate: null,
+  features: input.features ?? null,
+});
 
   const confidence = calculateConfidence({
     baseScore: input.score,
