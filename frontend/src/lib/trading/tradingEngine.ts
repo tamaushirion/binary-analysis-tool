@@ -8,10 +8,11 @@ import { applyWeightLearning } from "@/lib/learning/weightLearning";
 import { applySimilarityLearning } from "@/lib/learning/similarityLearning";
 import { calculateConfidence } from "@/lib/learning/confidenceEngine";
 import {
+  createTradeResultLineText,
   sendLinePushMessage,
-  usdToJpyText,
 } from "../line/lineClient";
 import { applyEntryGate } from "@/lib/learning/entryGate";
+
 
 export type TradingEngineInput = {
   accountId: string;
@@ -180,27 +181,17 @@ if (!gate.allow) {
     });
   }
 
-  const profit = Number(monitor.profit ?? 0);
-const resultText = monitor.status === "WON" ? "勝ち ✅" : "負け ❌";
-const icon = monitor.status === "WON" ? "🟢" : "🔴";
-const profitLabel = profit >= 0 ? "利益" : "損益";
-const profitSign = profit > 0 ? "+" : "";
-
-await sendLinePushMessage({
-  text:
-    `${icon} デモ取引結果\n\n` +
-    `結果：${resultText}\n\n` +
-    `銘柄：${input.pair}\n` +
-    `方向：${input.direction}\n` +
-    `掛け金：${monitor.buyPrice} USD（${usdToJpyText(monitor.buyPrice)}）\n\n` +
-    `${profitLabel}：${profitSign}${profit.toFixed(2)} USD（${usdToJpyText(profit)}）\n` +
-    `判定スコア：${finalScore}\n` +
-    `Confidence：${confidence.confidence}\n\n` +
-    `ひとこと：${
-      monitor.status === "WON"
-        ? "良い結果です。この調子でデモ検証を続けます。"
-        : "負けも検証データとして保存しました。連敗時はリスク制御を確認します。"
-    }`,
+  await sendLinePushMessage({
+  text: createTradeResultLineText({
+    pair: input.pair,
+    direction: input.direction,
+    status: monitor.status,
+    buyPrice: monitor.buyPrice,
+    profit: monitor.profit,
+    finalScore,
+    confidence: confidence.confidence,
+    entryGate: gate,
+  }),
 });
 
   return {
