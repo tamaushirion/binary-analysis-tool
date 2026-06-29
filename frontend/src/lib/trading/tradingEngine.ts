@@ -11,6 +11,7 @@ import {
   sendLinePushMessage,
   usdToJpyText,
 } from "../line/lineClient";
+import { applyEntryGate } from "@/lib/learning/entryGate";
 
 export type TradingEngineInput = {
   accountId: string;
@@ -73,6 +74,29 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       message: `Confidence不足のため見送り: ${confidence.confidence}/${confidence.minConfidence}`,
     };
   }
+
+    const gate = applyEntryGate({
+  confidence: confidence.confidence,
+  similarityScore: similarity.adjustedScore,
+  weightScore: learning.adjustedScore,
+  smcScore: Number(input.features?.smcScore ?? 0),
+  atr: Number(input.features?.atr ?? 0),
+  atrThreshold: Number(input.features?.atrThreshold ?? 0),
+  backtestWinRate1m: Number(input.features?.backtestWinRate1m ?? 0),
+});
+
+if (!gate.allow) {
+  return {
+    ok: true,
+    stage: "engine_skipped_by_entry_gate",
+    learning,
+    similarity,
+    confidence,
+    entryGate: gate,
+    finalScore: similarity.adjustedScore,
+    message: `Entry Gate: ${gate.reasons.join(" / ")}`,
+  };
+}
 
   const demoTrade = await executeDemoTrade({
     accountId: input.accountId,
@@ -148,6 +172,9 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
         weightScore: learning.adjustedScore,
         similarityScore: similarity.adjustedScore,
         finalScore,
+        entryGate: gate.allow,
+        entryGateScore: gate.score,
+        entryGateReasons: gate.reasons,
       },
     });
   }
