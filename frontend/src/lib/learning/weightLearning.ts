@@ -1,4 +1,5 @@
 import db from "@/lib/db/database";
+import type { TradeFeatureSnapshot } from "@/lib/db/tradeRepository";
 
 export type WeightLearningInput = {
   pair: string;
@@ -6,6 +7,7 @@ export type WeightLearningInput = {
   score: number;
   payoutRate?: number | null;
   startTime?: number | null;
+  features?: TradeFeatureSnapshot | null;
 };
 
 export type WeightLearningResult = {
@@ -18,6 +20,10 @@ export type WeightLearningResult = {
     directionWeight: number;
     payoutWeight: number;
     scoreBandWeight: number;
+    emaTrendWeight: number;
+    smcWeight: number;
+    atrWeight: number;
+    entryGateWeight: number;
   };
   reasons: string[];
 };
@@ -54,6 +60,13 @@ function getPayoutBand(payoutRate?: number | null) {
   return "0-1.79";
 }
 
+function getAtrBand(atr?: number | null) {
+  if (!atr || atr <= 0) return "unknown";
+  if (atr < 0.03) return "LOW";
+  if (atr < 0.08) return "NORMAL";
+  return "HIGH";
+}
+
 function getCurrentHour(startTime?: number | null) {
   const date = startTime ? new Date(startTime * 1000) : new Date();
   return date.getHours();
@@ -68,12 +81,55 @@ function getStat(query: string, params: any[]) {
     | undefined;
 }
 
+function statToWeight(
+  label: string,
+  stat: { totalTrades: number; winRate: number | null } | undefined,
+  reasons: string[]
+) {
+  const totalTrades = stat?.totalTrades ?? 0;
+  const winRate = stat?.winRate ?? null;
+  const weight = getWinRateWeight(winRate, totalTrades);
+
+  if (totalTrades < 5) {
+    reasons.push(`${label}: データ不足`);
+  } else {
+    reasons.push(`${label}: 勝率${winRate}% / 補正${weight}`);
+  }
+
+  return weight;
+}
+
 export function applyWeightLearning(
   input: WeightLearningInput
 ): WeightLearningResult {
   const hour = getCurrentHour(input.startTime);
   const scoreBand = getScoreBand(input.score);
   const payoutBand = getPayoutBand(input.payoutRate);
+  const atrBand = getAtrBand(input.features?.atr);
+
+  const emaTrend =
+    input.features?.emaDiff == null
+      ? "unknown"
+      : Number(input.features.emaDiff) > 0
+      ? "UP"
+      : Number(input.features.emaDiff) < 0
+      ? "DOWN"
+      : "RANGE";
+
+  const smcKey = [
+    input.features?.bos ? "BOS" : "",
+    input.features?.choch ? "CHOCH" : "",
+    input.features?.fvg ? "FVG" : "",
+  ]
+    .filter(Boolean)
+    .join("+") || "NONE";
+
+  const entryGateKey =
+    input.features?.entryGate === true
+      ? "PASS"
+      : input.features?.entryGate === false
+      ? "BLOCK"
+      : "unknown";
 
   const reasons: string[] = [];
 
@@ -83,7 +139,7 @@ export function applyWeightLearning(
       COUNT(*) as totalTrades,
       ROUND(100.0 * SUM(CASE WHEN status = 'WON' THEN 1 ELSE 0 END) / COUNT(*), 2) as winRate
     FROM trade_history
-    WHERE CAST(strftime('%H', datetime(start_time, 'unixepoch', 'localtime')) AS INTEGER) = ?
+    WHERE COALESCE(hour, CAST(strftime('%H', datetime(start_time, 'unixepoch', 'localtime')) AS INTEGER)) = ?
     `,
     [hour]
   );
@@ -144,30 +200,75 @@ export function applyWeightLearning(
     [payoutBand]
   );
 
-  const hourWeight = getWinRateWeight(
-    hourStat?.winRate ?? null,
-    hourStat?.totalTrades ?? 0
+  const emaTrendStat = getStat(
+    `
+    SELECT
+      COUNT(*) as totalTrades,
+      ROUND(100.0 * SUM(CASE WHEN status = 'WON' THEN 1 ELSE 0 END) / COUNT(*), 2) as winRate
+    FROM trade_history
+    WHERE
+      CASE
+        WHEN ema_diff > 0 THEN 'UP'
+        WHEN ema_diff < 0 THEN 'DOWN'
+        ELSE 'RANGE'
+      END = ?
+    `,
+    [emaTrend]
   );
 
-  const pairWeight = getWinRateWeight(
-    pairStat?.winRate ?? null,
-    pairStat?.totalTrades ?? 0
+  const smcStat = getStat(
+    `
+    SELECT
+      COUNT(*) as totalTrades,
+      ROUND(100.0 * SUM(CASE WHEN status = 'WON' THEN 1 ELSE 0 END) / COUNT(*), 2) as winRate
+    FROM trade_history
+    WHERE
+      (
+        CASE WHEN bos = 1 THEN 'BOS' ELSE '' END ||
+        CASE WHEN choch = 1 THEN '+CHOCH' ELSE '' END ||
+        CASE WHEN fvg = 1 THEN '+FVG' ELSE '' END
+      ) LIKE ?
+    `,
+    [`%${smcKey.split("+")[0] === "NONE" ? "" : smcKey.split("+")[0]}%`]
   );
 
-  const directionWeight = getWinRateWeight(
-    directionStat?.winRate ?? null,
-    directionStat?.totalTrades ?? 0
+  const atrStat = getStat(
+    `
+    SELECT
+      COUNT(*) as totalTrades,
+      ROUND(100.0 * SUM(CASE WHEN status = 'WON' THEN 1 ELSE 0 END) / COUNT(*), 2) as winRate
+    FROM trade_history
+    WHERE
+      CASE
+        WHEN atr IS NULL OR atr <= 0 THEN 'unknown'
+        WHEN atr < 0.03 THEN 'LOW'
+        WHEN atr < 0.08 THEN 'NORMAL'
+        ELSE 'HIGH'
+      END = ?
+    `,
+    [atrBand]
   );
 
-  const payoutWeight = getWinRateWeight(
-    payoutStat?.winRate ?? null,
-    payoutStat?.totalTrades ?? 0
+  const entryGateStat = getStat(
+    `
+    SELECT
+      COUNT(*) as totalTrades,
+      ROUND(100.0 * SUM(CASE WHEN status = 'WON' THEN 1 ELSE 0 END) / COUNT(*), 2) as winRate
+    FROM trade_history
+    WHERE json_extract(feature_snapshot, '$.entryGate') = ?
+    `,
+    [entryGateKey === "PASS" ? 1 : entryGateKey === "BLOCK" ? 0 : null]
   );
 
-  const scoreBandWeight = getWinRateWeight(
-    scoreBandStat?.winRate ?? null,
-    scoreBandStat?.totalTrades ?? 0
-  );
+  const hourWeight = statToWeight(`時間帯${hour}時`, hourStat, reasons);
+  const pairWeight = statToWeight(input.pair, pairStat, reasons);
+  const directionWeight = statToWeight(input.direction, directionStat, reasons);
+  const payoutWeight = statToWeight(`Payout ${payoutBand}`, payoutStat, reasons);
+  const scoreBandWeight = statToWeight(`Score ${scoreBand}`, scoreBandStat, reasons);
+  const emaTrendWeight = statToWeight(`EMA ${emaTrend}`, emaTrendStat, reasons);
+  const smcWeight = statToWeight(`SMC ${smcKey}`, smcStat, reasons);
+  const atrWeight = statToWeight(`ATR ${atrBand}`, atrStat, reasons);
+  const entryGateWeight = statToWeight(`EntryGate ${entryGateKey}`, entryGateStat, reasons);
 
   const weights = {
     hourWeight,
@@ -175,6 +276,10 @@ export function applyWeightLearning(
     directionWeight,
     payoutWeight,
     scoreBandWeight,
+    emaTrendWeight,
+    smcWeight,
+    atrWeight,
+    entryGateWeight,
   };
 
   const totalWeight =
@@ -182,25 +287,11 @@ export function applyWeightLearning(
     pairWeight +
     directionWeight +
     payoutWeight +
-    scoreBandWeight;
-
-  if ((hourStat?.totalTrades ?? 0) < 5) reasons.push(`時間帯${hour}時: データ不足`);
-  else reasons.push(`時間帯${hour}時補正: ${hourWeight}`);
-
-  if ((pairStat?.totalTrades ?? 0) < 5) reasons.push(`${input.pair}: データ不足`);
-  else reasons.push(`${input.pair}補正: ${pairWeight}`);
-
-  if ((directionStat?.totalTrades ?? 0) < 5)
-    reasons.push(`${input.direction}: データ不足`);
-  else reasons.push(`${input.direction}補正: ${directionWeight}`);
-
-  if ((payoutStat?.totalTrades ?? 0) < 5)
-    reasons.push(`Payout ${payoutBand}: データ不足`);
-  else reasons.push(`Payout ${payoutBand}補正: ${payoutWeight}`);
-
-  if ((scoreBandStat?.totalTrades ?? 0) < 5)
-    reasons.push(`Score ${scoreBand}: データ不足`);
-  else reasons.push(`Score ${scoreBand}補正: ${scoreBandWeight}`);
+    scoreBandWeight +
+    emaTrendWeight +
+    smcWeight +
+    atrWeight +
+    entryGateWeight;
 
   return {
     baseScore: input.score,
