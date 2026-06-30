@@ -12,7 +12,10 @@ import {
   sendLinePushMessage,
 } from "../line/lineClient";
 import { applyEntryGate } from "@/lib/learning/entryGate";
-import { notifyDemo100CompletedIfNeeded } from "@/lib/demo100Mode";
+import {
+  getDemo100Status,
+  notifyDemo100CompletedIfNeeded,
+} from "@/lib/demo100Mode";
 
 export type TradingEngineInput = {
   accountId: string;
@@ -38,6 +41,18 @@ function durationToMs(duration: number, unit: "s" | "m" | "h" | "d") {
 }
 
 export async function executeDemoTradingEngine(input: TradingEngineInput) {
+  const demo100Before = getDemo100Status();
+
+  if (demo100Before.completed) {
+    return {
+      ok: true,
+      stage: "engine_stopped_by_demo_100_completed",
+      demo100: demo100Before,
+      message:
+        "100件デモ運用が完了済みのため、自動エントリーを停止しました。Phase14-CのAI分析に進んでください。",
+    };
+  }
+
   const duration = Number(input.duration ?? 5);
   const durationUnit = input.durationUnit ?? "m";
 
@@ -69,6 +84,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     return {
       ok: true,
       stage: "engine_skipped_by_confidence",
+      demo100: demo100Before,
       learning,
       similarity,
       confidence,
@@ -91,6 +107,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     return {
       ok: true,
       stage: "engine_skipped_by_entry_gate",
+      demo100: demo100Before,
       learning,
       similarity,
       confidence,
@@ -117,6 +134,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     return {
       ok: true,
       stage: "engine_skipped",
+      demo100: demo100Before,
       learning,
       similarity,
       confidence,
@@ -132,6 +150,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     return {
       ok: false,
       stage: "engine_error",
+      demo100: demo100Before,
       learning,
       similarity,
       confidence,
@@ -152,6 +171,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
 
   let savedTrade = null;
   let demo100Notify = null;
+  let demo100After = demo100Before;
 
   if (monitor.ok && monitor.stage === "contract_closed") {
     savedTrade = saveTradeHistory({
@@ -182,6 +202,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     });
 
     demo100Notify = await notifyDemo100CompletedIfNeeded();
+    demo100After = getDemo100Status();
   }
 
   await sendLinePushMessage({
@@ -200,6 +221,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
   return {
     ok: monitor.ok,
     stage: monitor.ok ? "engine_completed" : "engine_monitor_failed",
+    demo100: demo100After,
     learning,
     similarity,
     confidence,
