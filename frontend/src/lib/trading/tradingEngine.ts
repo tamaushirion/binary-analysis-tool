@@ -12,7 +12,7 @@ import {
   sendLinePushMessage,
 } from "../line/lineClient";
 import { applyEntryGate } from "@/lib/learning/entryGate";
-
+import { notifyDemo100CompletedIfNeeded } from "@/lib/demo100Mode";
 
 export type TradingEngineInput = {
   accountId: string;
@@ -49,12 +49,12 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
   });
 
   const similarity = applySimilarityLearning({
-  pair: input.pair,
-  direction: input.direction,
-  score: learning.adjustedScore,
-  payoutRate: null,
-  features: input.features ?? null,
-});
+    pair: input.pair,
+    direction: input.direction,
+    score: learning.adjustedScore,
+    payoutRate: null,
+    features: input.features ?? null,
+  });
 
   const confidence = calculateConfidence({
     baseScore: input.score,
@@ -77,28 +77,28 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     };
   }
 
-    const gate = applyEntryGate({
-  confidence: confidence.confidence,
-  similarityScore: similarity.adjustedScore,
-  weightScore: learning.adjustedScore,
-  smcScore: Number(input.features?.smcScore ?? 0),
-  atr: Number(input.features?.atr ?? 0),
-  atrThreshold: Number(input.features?.atrThreshold ?? 0),
-  backtestWinRate1m: Number(input.features?.backtestWinRate1m ?? 0),
-});
+  const gate = applyEntryGate({
+    confidence: confidence.confidence,
+    similarityScore: similarity.adjustedScore,
+    weightScore: learning.adjustedScore,
+    smcScore: Number(input.features?.smcScore ?? 0),
+    atr: Number(input.features?.atr ?? 0),
+    atrThreshold: Number(input.features?.atrThreshold ?? 0),
+    backtestWinRate1m: Number(input.features?.backtestWinRate1m ?? 0),
+  });
 
-if (!gate.allow) {
-  return {
-    ok: true,
-    stage: "engine_skipped_by_entry_gate",
-    learning,
-    similarity,
-    confidence,
-    entryGate: gate,
-    finalScore: similarity.adjustedScore,
-    message: `Entry Gate: ${gate.reasons.join(" / ")}`,
-  };
-}
+  if (!gate.allow) {
+    return {
+      ok: true,
+      stage: "engine_skipped_by_entry_gate",
+      learning,
+      similarity,
+      confidence,
+      entryGate: gate,
+      finalScore: similarity.adjustedScore,
+      message: `Entry Gate: ${gate.reasons.join(" / ")}`,
+    };
+  }
 
   const demoTrade = await executeDemoTrade({
     accountId: input.accountId,
@@ -151,6 +151,7 @@ if (!gate.allow) {
   });
 
   let savedTrade = null;
+  let demo100Notify = null;
 
   if (monitor.ok && monitor.stage === "contract_closed") {
     savedTrade = saveTradeHistory({
@@ -179,20 +180,22 @@ if (!gate.allow) {
         entryGateReasons: gate.reasons,
       },
     });
+
+    demo100Notify = await notifyDemo100CompletedIfNeeded();
   }
 
   await sendLinePushMessage({
-  text: createTradeResultLineText({
-    pair: input.pair,
-    direction: input.direction,
-    status: monitor.status,
-    buyPrice: monitor.buyPrice,
-    profit: monitor.profit,
-    finalScore,
-    confidence: confidence.confidence,
-    entryGate: gate,
-  }),
-});
+    text: createTradeResultLineText({
+      pair: input.pair,
+      direction: input.direction,
+      status: monitor.status,
+      buyPrice: monitor.buyPrice,
+      profit: monitor.profit,
+      finalScore,
+      confidence: confidence.confidence,
+      entryGate: gate,
+    }),
+  });
 
   return {
     ok: monitor.ok,
@@ -204,6 +207,7 @@ if (!gate.allow) {
     demoTrade,
     monitor,
     savedTrade,
+    demo100Notify,
     monitorConfig: {
       duration,
       durationUnit,
@@ -211,7 +215,7 @@ if (!gate.allow) {
       intervalMs: 5_000,
     },
     message: monitor.ok
-      ? "Weight → Similarity → Confidence → Demo Buy → Contract監視 → SQLite保存 完了"
+      ? "Weight → Similarity → Confidence → Demo Buy → Contract監視 → SQLite保存 → Demo100確認 完了"
       : "Demo Buy は成功しましたが Contract監視が完了しませんでした",
   };
 }
