@@ -30,6 +30,7 @@ type BreakdownItem = {
 type Demo100Analysis = {
   sampleSize: number;
   completed: boolean;
+  penaltyCandidates: PenaltyCandidate[];
   overall: {
     total: number;
     wins: number;
@@ -61,6 +62,17 @@ type AnalysisApiResponse = {
   stage: string;
   analysis?: Demo100Analysis;
   message?: string;
+};
+
+type PenaltyCandidate = {
+  type: string;
+  key: string;
+  total: number;
+  winRate: number;
+  totalProfit: number;
+  severity: "LOW" | "MEDIUM" | "HIGH";
+  suggestedPenalty: number;
+  reason: string;
 };
 
 export default function Demo100DashboardPage() {
@@ -257,6 +269,52 @@ export default function Demo100DashboardPage() {
                   現時点で明確な減点候補はありません。
                 </p>
               )}
+            </section>
+
+            <section className="rounded-xl border border-red-800 bg-red-950 p-6">
+            <h2 className="text-xl font-bold text-red-200">
+                Entry Gate 減点候補
+            </h2>
+
+            {analysis.penaltyCandidates.length > 0 ? (
+                <div className="mt-4 overflow-x-auto">
+                <table className="w-full min-w-[760px] text-left text-sm">
+                    <thead className="text-red-200">
+                    <tr className="border-b border-red-800">
+                        <th className="py-2">種類</th>
+                        <th className="py-2">条件</th>
+                        <th className="py-2">件数</th>
+                        <th className="py-2">勝率</th>
+                        <th className="py-2">損益</th>
+                        <th className="py-2">危険度</th>
+                        <th className="py-2">推奨減点</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {analysis.penaltyCandidates.map((candidate, index) => (
+                        <tr
+                        key={`${candidate.type}-${candidate.key}-${index}`}
+                        className="border-b border-red-900"
+                        >
+                        <td className="py-2">{candidate.type}</td>
+                        <td className="py-2 font-bold">{candidate.key}</td>
+                        <td className="py-2">{candidate.total}</td>
+                        <td className="py-2">{candidate.winRate}%</td>
+                        <td className="py-2">{candidate.totalProfit} USD</td>
+                        <td className="py-2">{candidate.severity}</td>
+                        <td className="py-2 font-bold">
+                            {candidate.suggestedPenalty}
+                        </td>
+                        </tr>
+                    ))}
+                    </tbody>
+                </table>
+                </div>
+            ) : (
+                <p className="mt-3 text-red-100">
+                まだ減点候補はありません。最低5件以上たまった条件から判定します。
+                </p>
+            )}
             </section>
 
             <AnalysisTable title="通貨/銘柄別" rows={analysis.breakdowns.byPair} />
