@@ -1,6 +1,4 @@
-import Database from "better-sqlite3";
-
-const DB_PATH = process.env.SQLITE_DB_PATH || "data/trades.db";
+import db from "@/lib/db/database";
 
 export type Demo100Status = {
   enabled: boolean;
@@ -18,11 +16,23 @@ export type Demo100Status = {
   message: string;
 };
 
-function getDb() {
-  return new Database(DB_PATH);
-}
+type Demo100Run = {
+  id: number;
+  target_trades: number;
+  started_at: string | null;
+  started_at_ms: number | null;
+  completed_at: string | null;
+  completed_notified: number;
+  active: number;
+};
 
-function ensureDemo100Tables(db: Database.Database) {
+type Demo100Trade = {
+  status: string;
+  profit: number | null;
+  created_at: number | null;
+};
+
+function ensureDemo100Tables() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS demo_100_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,10 +43,40 @@ function ensureDemo100Tables(db: Database.Database) {
       active INTEGER NOT NULL DEFAULT 1
     );
   `);
+
+  const columns = db.prepare(`PRAGMA table_info(demo_100_runs)`).all() as Array<{
+    name: string;
+  }>;
+
+  const hasStartedAtMs = columns.some((column) => column.name === "started_at_ms");
+
+  if (!hasStartedAtMs) {
+    db.prepare(`ALTER TABLE demo_100_runs ADD COLUMN started_at_ms INTEGER`).run();
+  }
 }
 
-function getOrCreateActiveRun(db: Database.Database) {
-  ensureDemo100Tables(db);
+function getStartedAtMs(run: Demo100Run) {
+  if (run.started_at_ms) return run.started_at_ms;
+
+  const fallback = run.started_at
+    ? new Date(run.started_at.replace(" ", "T")).getTime()
+    : Date.now();
+
+  const startedAtMs = Number.isFinite(fallback) ? fallback : Date.now();
+
+  db.prepare(
+    `
+    UPDATE demo_100_runs
+    SET started_at_ms = ?
+    WHERE id = ?
+    `
+  ).run(startedAtMs, run.id);
+
+  return startedAtMs;
+}
+
+function getOrCreateActiveRun() {
+  ensureDemo100Tables();
 
   const activeRun = db
     .prepare(
@@ -46,20 +86,31 @@ function getOrCreateActiveRun(db: Database.Database) {
       WHERE active = 1
       ORDER BY id DESC
       LIMIT 1
-    `
+      `
     )
-    .get() as any;
+    .get() as Demo100Run | undefined;
 
   if (activeRun) return activeRun;
+
+  const now = Date.now();
 
   const result = db
     .prepare(
       `
-      INSERT INTO demo_100_runs (target_trades, active)
-      VALUES (100, 1)
-    `
+      INSERT INTO demo_100_runs (
+        target_trades,
+        started_at,
+        started_at_ms,
+        active
+      ) VALUES (
+        100,
+        CURRENT_TIMESTAMP,
+        ?,
+        1
+      )
+      `
     )
-    .run();
+    .run(now);
 
   return db
     .prepare(
@@ -67,86 +118,46 @@ function getOrCreateActiveRun(db: Database.Database) {
       SELECT *
       FROM demo_100_runs
       WHERE id = ?
-    `
+      `
     )
-    .get(result.lastInsertRowid) as any;
+    .get(result.lastInsertRowid) as Demo100Run;
 }
 
-function getTradeRows(db: Database.Database, startedAt: string) {
-  const tables = db
-    .prepare(
-      `
-      SELECT name
-      FROM sqlite_master
-      WHERE type = 'table'
-    `
-    )
-    .all() as { name: string }[];
-
-  const tableNames = tables.map((t) => t.name);
-
-  const tradeTable =
-    tableNames.find((name) => name === "trade_history") ||
-    tableNames.find((name) => name === "trades") ||
-    tableNames.find((name) => name.includes("trade"));
-
-  if (!tradeTable) return [];
-
-  const columns = db.prepare(`PRAGMA table_info(${tradeTable})`).all() as {
-    name: string;
-  }[];
-
-  const columnNames = columns.map((c) => c.name);
-
-  const resultColumn =
-    columnNames.find((c) => c === "result") ||
-    columnNames.find((c) => c === "status") ||
-    columnNames.find((c) => c === "outcome");
-
-  const profitColumn =
-    columnNames.find((c) => c === "profit") ||
-    columnNames.find((c) => c === "profit_loss") ||
-    columnNames.find((c) => c === "pnl");
-
-  const createdColumn =
-    columnNames.find((c) => c === "created_at") ||
-    columnNames.find((c) => c === "closed_at") ||
-    columnNames.find((c) => c === "finished_at") ||
-    columnNames.find((c) => c === "notifiedAt");
-
-  if (!resultColumn || !profitColumn) return [];
-
-  const where = createdColumn ? `WHERE ${createdColumn} >= ?` : "";
-  const params = createdColumn ? [startedAt] : [];
+function getDemo100Trades(run: Demo100Run) {
+  const startedAtMs = getStartedAtMs(run);
 
   return db
     .prepare(
       `
       SELECT
-        ${resultColumn} as result,
-        ${profitColumn} as profit
-      FROM ${tradeTable}
-      ${where}
-      ORDER BY rowid ASC
-    `
+        status,
+        profit,
+        created_at
+      FROM trade_history
+      WHERE created_at >= ?
+        AND profit IS NOT NULL
+        AND status IN ('WON', 'LOST')
+      ORDER BY created_at ASC
+      LIMIT ?
+      `
     )
-    .all(...params) as { result: string; profit: number }[];
+    .all(startedAtMs, run.target_trades) as Demo100Trade[];
 }
 
-function calcStreaks(rows: { result: string; profit: number }[]) {
+function calcStreaks(trades: Demo100Trade[]) {
   let currentWinStreak = 0;
   let currentLoseStreak = 0;
 
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const result = String(rows[i].result).toUpperCase();
+  for (let i = trades.length - 1; i >= 0; i--) {
+    const status = String(trades[i].status).toUpperCase();
 
-    if (result.includes("WIN")) {
+    if (status === "WON") {
       if (currentLoseStreak > 0) break;
       currentWinStreak++;
       continue;
     }
 
-    if (result.includes("LOSE") || result.includes("LOSS")) {
+    if (status === "LOST") {
       if (currentWinStreak > 0) break;
       currentLoseStreak++;
       continue;
@@ -155,126 +166,107 @@ function calcStreaks(rows: { result: string; profit: number }[]) {
     break;
   }
 
-  return { currentWinStreak, currentLoseStreak };
+  return {
+    currentWinStreak,
+    currentLoseStreak,
+  };
 }
 
 export function getDemo100Status(): Demo100Status {
-  const db = getDb();
+  const run = getOrCreateActiveRun();
+  const trades = getDemo100Trades(run);
 
-  try {
-    const run = getOrCreateActiveRun(db);
-    const rows = getTradeRows(db, run.started_at).slice(0, run.target_trades);
+  const wins = trades.filter((trade) => trade.status === "WON").length;
+  const losses = trades.filter((trade) => trade.status === "LOST").length;
+  const draws = Math.max(trades.length - wins - losses, 0);
 
-    const wins = rows.filter((r) =>
-      String(r.result).toUpperCase().includes("WIN")
-    ).length;
+  const totalProfit = Number(
+    trades.reduce((sum, trade) => sum + Number(trade.profit ?? 0), 0).toFixed(2)
+  );
 
-    const losses = rows.filter((r) => {
-      const result = String(r.result).toUpperCase();
-      return result.includes("LOSE") || result.includes("LOSS");
-    }).length;
+  const winRate =
+    wins + losses > 0 ? Number(((wins / (wins + losses)) * 100).toFixed(2)) : 0;
 
-    const draws = rows.length - wins - losses;
+  const completed = trades.length >= run.target_trades;
+  const remainingCount = Math.max(run.target_trades - trades.length, 0);
 
-    const totalProfit = rows.reduce((sum, r) => {
-      return sum + Number(r.profit || 0);
-    }, 0);
-
-    const winRate =
-      wins + losses > 0 ? Number(((wins / (wins + losses)) * 100).toFixed(2)) : 0;
-
-    const remainingCount = Math.max(run.target_trades - rows.length, 0);
-    const completed = rows.length >= run.target_trades;
-
-    if (completed && !run.completed_at) {
-      db.prepare(
-        `
-        UPDATE demo_100_runs
-        SET completed_at = CURRENT_TIMESTAMP
-        WHERE id = ?
+  if (completed && !run.completed_at) {
+    db.prepare(
       `
-      ).run(run.id);
-    }
-
-    const { currentWinStreak, currentLoseStreak } = calcStreaks(rows);
-
-    return {
-      enabled: true,
-      targetTrades: run.target_trades,
-      currentCount: rows.length,
-      remainingCount,
-      wins,
-      losses,
-      draws,
-      winRate,
-      totalProfit: Number(totalProfit.toFixed(2)),
-      currentWinStreak,
-      currentLoseStreak,
-      completed,
-      message: completed
-        ? "100件デモ運用が完了しました。次はPhase14-CのAI分析に進めます。"
-        : `100件デモ運用中：${rows.length}/${run.target_trades}件`,
-    };
-  } finally {
-    db.close();
+      UPDATE demo_100_runs
+      SET completed_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+      `
+    ).run(run.id);
   }
+
+  const { currentWinStreak, currentLoseStreak } = calcStreaks(trades);
+
+  return {
+    enabled: true,
+    targetTrades: run.target_trades,
+    currentCount: trades.length,
+    remainingCount,
+    wins,
+    losses,
+    draws,
+    winRate,
+    totalProfit,
+    currentWinStreak,
+    currentLoseStreak,
+    completed,
+    message: completed
+      ? "100件デモ運用が完了しました。次はPhase14-CのAI分析に進めます。"
+      : `100件デモ運用中：${trades.length}/${run.target_trades}件`,
+  };
 }
 
 export function resetDemo100Run() {
-  const db = getDb();
+  ensureDemo100Tables();
 
-  try {
-    ensureDemo100Tables(db);
-
-    db.prepare(
-      `
-      UPDATE demo_100_runs
-      SET active = 0
-      WHERE active = 1
+  db.prepare(
     `
-    ).run();
-
-    db.prepare(
-      `
-      INSERT INTO demo_100_runs (target_trades, active)
-      VALUES (100, 1)
+    UPDATE demo_100_runs
+    SET active = 0
+    WHERE active = 1
     `
-    ).run();
+  ).run();
 
-    return getDemo100Status();
-  } finally {
-    db.close();
-  }
+  db.prepare(
+    `
+    INSERT INTO demo_100_runs (
+      target_trades,
+      started_at,
+      started_at_ms,
+      active
+    ) VALUES (
+      100,
+      CURRENT_TIMESTAMP,
+      ?,
+      1
+    )
+    `
+  ).run(Date.now());
+
+  return getDemo100Status();
 }
 
 export function markDemo100CompletedNotified() {
-  const db = getDb();
+  ensureDemo100Tables();
 
-  try {
-    ensureDemo100Tables(db);
-
-    db.prepare(
-      `
-      UPDATE demo_100_runs
-      SET completed_notified = 1
-      WHERE active = 1
+  db.prepare(
     `
-    ).run();
-  } finally {
-    db.close();
-  }
+    UPDATE demo_100_runs
+    SET completed_notified = 1
+    WHERE active = 1
+    `
+  ).run();
 }
 
 export function shouldNotifyDemo100Completed() {
-  const db = getDb();
+  const run = getOrCreateActiveRun();
 
-  try {
-    const run = getOrCreateActiveRun(db);
-
-    return Number(run.completed_notified) === 0;
-  } finally {
-    db.close();
-  }
+  return Number(run.completed_notified) === 0;
 }
 
 export async function notifyDemo100CompletedIfNeeded() {
