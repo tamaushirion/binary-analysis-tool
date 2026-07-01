@@ -29,7 +29,8 @@ function calcEma(values: number[], period: number) {
   if (values.length < period) return 0;
 
   const k = 2 / (period + 1);
-  let ema = values.slice(0, period).reduce((sum, value) => sum + value, 0) / period;
+  let ema =
+    values.slice(0, period).reduce((sum, value) => sum + value, 0) / period;
 
   for (let i = period; i < values.length; i++) {
     ema = values[i] * k + ema * (1 - k);
@@ -60,14 +61,6 @@ function calcRci(values: number[], period: number) {
   return Number(rci.toFixed(2));
 }
 
-const FALLBACK_CANDLES: ChartCandle[] = [
-  { time: "2026-06-07", open: 155.1, high: 155.3, low: 154.9, close: 155.2 },
-  { time: "2026-06-08", open: 155.2, high: 155.5, low: 155.0, close: 155.4 },
-  { time: "2026-06-09", open: 155.4, high: 155.45, low: 155.1, close: 155.15 },
-  { time: "2026-06-10", open: 155.15, high: 155.35, low: 154.95, close: 155.3 },
-  { time: "2026-06-11", open: 155.3, high: 155.6, low: 155.25, close: 155.55 },
-];
-
 export default function ChartPanel({
   title,
   subtitle,
@@ -82,7 +75,13 @@ export default function ChartPanel({
   useEffect(() => {
     if (!chartRef.current) return;
 
-    const chartCandles = candles && candles.length > 0 ? candles : FALLBACK_CANDLES;
+    const chartCandles = candles ?? [];
+
+    if (chartCandles.length === 0) {
+      onEmaUpdate?.(0, 0);
+      onRciUpdate?.(0, 0, 0);
+      return;
+    }
 
     const chart = createChart(chartRef.current, {
       height,
@@ -120,11 +119,25 @@ export default function ChartPanel({
     return () => chart.remove();
   }, [candles, height, onEmaUpdate, onPriceUpdate, onRciUpdate]);
 
+  const hasCandles = candles && candles.length > 0;
+
   return (
     <div className="h-full">
       <h2 className="text-lg font-bold">{title}</h2>
       <p className="mb-3 text-sm text-zinc-400">{subtitle}</p>
-      <div ref={chartRef} />
+
+      {hasCandles ? (
+        <div ref={chartRef} />
+      ) : (
+        <div
+          className="flex items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900 text-center text-sm font-bold text-zinc-400"
+          style={{ height }}
+        >
+          チャートデータなし
+          <br />
+          Synthetic系は次PhaseでDeriv Tickから描画します
+        </div>
+      )}
     </div>
   );
 }
