@@ -16,6 +16,7 @@ import {
   getDemo100Status,
   notifyDemo100CompletedIfNeeded,
 } from "@/lib/demo100Mode";
+import { adjustScoreByPerformance } from "@/lib/analysis/scorePerformanceAdjuster";
 
 export type TradingEngineInput = {
   accountId: string;
@@ -71,11 +72,11 @@ function relaxEntryGateForColdStart(params: {
   const canRelax =
     params.confidence >= 35 &&
     params.finalScore >= 75 &&
-    params.gate.reasons.every((reason) =>
-      ["Confidence不足", "SMC不足", "1分Backtest弱い"].some((allowed) =>
-        reason.includes(allowed)
-      ) ||
-      reason.includes("OK")
+    params.gate.reasons.every(
+      (reason) =>
+        ["Confidence不足", "SMC不足", "1分Backtest弱い"].some((allowed) =>
+          reason.includes(allowed)
+        ) || reason.includes("OK")
     );
 
   if (!canRelax) return params.gate;
@@ -99,7 +100,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       stage: "engine_stopped_by_demo_100_completed",
       demo100: demo100Before,
       message:
-        "100件デモ運用が完了済みのため、自動エントリーを停止しました。Phase14-CのAI分析に進んでください。",
+        "100件デモ運用が完了済みのため、自動エントリーを停止しました。Phase15-CのAI改善に進んでください。",
     };
   }
 
@@ -143,53 +144,61 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     features: input.features ?? null,
   });
 
+  const scorePerformance = adjustScoreByPerformance(similarity.adjustedScore);
+  const finalScore = scorePerformance.adjustedScore;
+
   const confidence = calculateConfidence({
     baseScore: input.score,
     weightAdjustedScore: learning.adjustedScore,
-    similarity,
+    similarity: {
+      ...similarity,
+      adjustedScore: finalScore,
+      reasons: [
+        ...(similarity.reasons ?? []),
+        ...scorePerformance.reasons,
+      ],
+    },
     minConfidence: effectiveMinConfidence,
   });
 
-  const finalScore = similarity.adjustedScore;
-
   const shouldSkipByConfidence =
-  !confidence.trade && !coldStartDemoMode.enabled;
+    !confidence.trade && !coldStartDemoMode.enabled;
 
-if (shouldSkipByConfidence) {
-  return {
-    ok: true,
-    stage: "engine_skipped_by_confidence",
-    demo100: demo100Before,
-    coldStartDemoMode,
-    learning,
-    similarity,
-    confidence,
-    finalScore,
-    message: `Confidence不足のため見送り: ${confidence.confidence}/${confidence.minConfidence}`,
-  };
-}
+  if (shouldSkipByConfidence) {
+    return {
+      ok: true,
+      stage: "engine_skipped_by_confidence",
+      demo100: demo100Before,
+      coldStartDemoMode,
+      learning,
+      similarity,
+      scorePerformance,
+      confidence,
+      finalScore,
+      message: `Confidence不足のため見送り: ${confidence.confidence}/${confidence.minConfidence}`,
+    };
+  }
 
   const rawGate = applyEntryGate({
-  confidence: confidence.confidence,
-  similarityScore: similarity.adjustedScore,
-  weightScore: learning.adjustedScore,
-  smcScore: Number(input.features?.smcScore ?? 0),
-  atr: Number(input.features?.atr ?? 0),
-  atrThreshold: Number(input.features?.atrThreshold ?? 0),
-  backtestWinRate1m: Number(input.features?.backtestWinRate1m ?? 0),
-});
+    confidence: confidence.confidence,
+    similarityScore: finalScore,
+    weightScore: learning.adjustedScore,
+    smcScore: Number(input.features?.smcScore ?? 0),
+    atr: Number(input.features?.atr ?? 0),
+    atrThreshold: Number(input.features?.atrThreshold ?? 0),
+    backtestWinRate1m: Number(input.features?.backtestWinRate1m ?? 0),
+  });
 
-const gate = relaxEntryGateForColdStart({
-  coldStartEnabled: coldStartDemoMode.enabled,
-  gate: rawGate,
-  confidence: confidence.confidence,
-  finalScore,
-});
+  const gate = relaxEntryGateForColdStart({
+    coldStartEnabled: coldStartDemoMode.enabled,
+    gate: rawGate,
+    confidence: confidence.confidence,
+    finalScore,
+  });
 
-const shouldSkipByGate =
-  !gate.allow && !coldStartDemoMode.enabled;
+  const shouldSkipByGate = !gate.allow && !coldStartDemoMode.enabled;
 
-if (shouldSkipByGate) {
+  if (shouldSkipByGate) {
     return {
       ok: true,
       stage: "engine_skipped_by_entry_gate",
@@ -197,9 +206,10 @@ if (shouldSkipByGate) {
       coldStartDemoMode,
       learning,
       similarity,
+      scorePerformance,
       confidence,
       entryGate: gate,
-      finalScore: similarity.adjustedScore,
+      finalScore,
       message: `Entry Gate: ${gate.reasons.join(" / ")}`,
     };
   }
@@ -225,7 +235,9 @@ if (shouldSkipByGate) {
       coldStartDemoMode,
       learning,
       similarity,
+      scorePerformance,
       confidence,
+      entryGate: gate,
       finalScore,
       demoTrade,
       message: "Final Decision が SKIP のため監視・保存しませんでした",
@@ -242,7 +254,9 @@ if (shouldSkipByGate) {
       coldStartDemoMode,
       learning,
       similarity,
+      scorePerformance,
       confidence,
+      entryGate: gate,
       finalScore,
       demoTrade,
       error: "contractId が取得できませんでした",
@@ -283,6 +297,14 @@ if (shouldSkipByGate) {
         aiScore: input.score,
         weightScore: learning.adjustedScore,
         similarityScore: similarity.adjustedScore,
+        scorePerformanceOriginalScore: scorePerformance.originalScore,
+        scorePerformanceAdjustedScore: scorePerformance.adjustedScore,
+        scorePerformanceAdjustment: scorePerformance.adjustment,
+        scorePerformanceBand: scorePerformance.scoreBand,
+        scorePerformanceWinRate: scorePerformance.winRate,
+        scorePerformanceSampleSize: scorePerformance.sampleSize,
+        scorePerformanceConfidence: scorePerformance.confidence,
+        scorePerformanceReasons: scorePerformance.reasons,
         finalScore,
         entryGate: gate.allow,
         entryGateScore: gate.score,
@@ -316,7 +338,9 @@ if (shouldSkipByGate) {
     coldStartDemoMode,
     learning,
     similarity,
+    scorePerformance,
     confidence,
+    entryGate: gate,
     finalScore,
     demoTrade,
     monitor,
@@ -329,7 +353,7 @@ if (shouldSkipByGate) {
       intervalMs: 5_000,
     },
     message: monitor.ok
-      ? "Cold Start Demo → Weight → Similarity → Confidence → Entry Gate → Demo Buy → Contract監視 → SQLite保存 → Demo100確認 完了"
+      ? "Cold Start Demo → Weight → Similarity → Score Performance → Confidence → Entry Gate → Demo Buy → Contract監視 → SQLite保存 → Demo100確認 完了"
       : "Demo Buy は成功しましたが Contract監視が完了しませんでした",
   };
 }
