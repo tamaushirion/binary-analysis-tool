@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { UTCTimestamp } from "lightweight-charts";
 
 import ChartPanel from "./components/ChartPanel";
+import Demo100AnalyzerCard from "./components/Demo100AnalyzerCard";
 
 import {
   backtestRealCandles,
@@ -993,6 +994,8 @@ async function stopServerAutoRunner() {
                 Synthetic系はDeriv Tick未接続のため、Demo100収集を優先。
               </p>
             </Card>
+
+            <Demo100AnalyzerCard />
           </div>
 
           <div className="lg:col-span-8">
