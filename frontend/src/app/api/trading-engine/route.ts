@@ -6,6 +6,10 @@ export const dynamic = "force-dynamic";
 const DEFAULT_DERIV_ACCOUNT_ID =
   process.env.DERIV_ACCOUNT_ID || "DOT93536475";
 
+function toBoolean(value: unknown) {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
@@ -23,6 +27,9 @@ export async function POST(request: Request) {
       minPayoutRate: body.minPayoutRate ? Number(body.minPayoutRate) : 1.8,
       minConfidence: body.minConfidence ? Number(body.minConfidence) : 75,
       features: body.features ?? null,
+      debugBypassDemo100Completed: toBoolean(
+        body.debugBypassDemo100Completed
+      ),
     });
 
     return NextResponse.json({

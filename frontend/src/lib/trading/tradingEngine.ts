@@ -12,11 +12,11 @@ import {
   sendLinePushMessage,
 } from "../line/lineClient";
 import { applyEntryGate } from "@/lib/learning/entryGate";
+import { applyEmpiricalEntryGate } from "@/lib/learning/empiricalEntryGate";
 import {
   getDemo100Status,
   notifyDemo100CompletedIfNeeded,
 } from "@/lib/demo100Mode";
-import { adjustScoreByPerformance } from "@/lib/analysis/scorePerformanceAdjuster";
 
 export type TradingEngineInput = {
   accountId: string;
@@ -31,6 +31,14 @@ export type TradingEngineInput = {
   minPayoutRate?: number;
   minConfidence?: number;
   features?: TradeFeatureSnapshot | null;
+
+  /**
+   * Phase15-E検証専用。
+   * true の時だけ Demo100 completed 停止と通常Gate停止を通過して、
+   * Empirical Entry Gate の判定まで確認できる。
+   * 通常運用・Auto Runnerでは指定しない。
+   */
+  debugBypassDemo100Completed?: boolean;
 };
 
 function durationToMs(duration: number, unit: "s" | "m" | "h" | "d") {
@@ -91,16 +99,35 @@ function relaxEntryGateForColdStart(params: {
   };
 }
 
+function bypassEntryGateForVerification(params: {
+  verificationEnabled: boolean;
+  gate: ReturnType<typeof applyEntryGate>;
+}) {
+  if (!params.verificationEnabled) return params.gate;
+  if (params.gate.allow) return params.gate;
+
+  return {
+    ...params.gate,
+    allow: true,
+    reasons: [
+      ...params.gate.reasons,
+      "Verification Mode: Empirical Entry Gate確認のため通常Entry Gateを一時バイパス",
+    ],
+  };
+}
+
 export async function executeDemoTradingEngine(input: TradingEngineInput) {
   const demo100Before = getDemo100Status();
+  const debugBypassDemo100Completed =
+    input.debugBypassDemo100Completed === true;
 
-  if (demo100Before.completed) {
+  if (demo100Before.completed && !debugBypassDemo100Completed) {
     return {
       ok: true,
       stage: "engine_stopped_by_demo_100_completed",
       demo100: demo100Before,
       message:
-        "100件デモ運用が完了済みのため、自動エントリーを停止しました。Phase15-CのAI改善に進んでください。",
+        "100件デモ運用が完了済みのため、自動エントリーを停止しました。Phase15のAI分析に進んでください。",
     };
   }
 
@@ -129,6 +156,13 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     targetTrades: demo100Before.targetTrades,
   };
 
+  const verificationMode = {
+    enabled: debugBypassDemo100Completed,
+    reason: debugBypassDemo100Completed
+      ? "Phase15-E検証用: Demo100完了停止・通常Entry Gate停止を一時バイパス"
+      : "通常運用",
+  };
+
   const learning = applyWeightLearning({
     pair: input.pair,
     direction: input.direction,
@@ -144,25 +178,19 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     features: input.features ?? null,
   });
 
-  const scorePerformance = adjustScoreByPerformance(similarity.adjustedScore);
-  const finalScore = scorePerformance.adjustedScore;
-
   const confidence = calculateConfidence({
     baseScore: input.score,
     weightAdjustedScore: learning.adjustedScore,
-    similarity: {
-      ...similarity,
-      adjustedScore: finalScore,
-      reasons: [
-        ...(similarity.reasons ?? []),
-        ...scorePerformance.reasons,
-      ],
-    },
+    similarity,
     minConfidence: effectiveMinConfidence,
   });
 
+  const similarityFinalScore = similarity.adjustedScore;
+
   const shouldSkipByConfidence =
-    !confidence.trade && !coldStartDemoMode.enabled;
+    !confidence.trade &&
+    !coldStartDemoMode.enabled &&
+    !verificationMode.enabled;
 
   if (shouldSkipByConfidence) {
     return {
@@ -170,18 +198,18 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       stage: "engine_skipped_by_confidence",
       demo100: demo100Before,
       coldStartDemoMode,
+      verificationMode,
       learning,
       similarity,
-      scorePerformance,
       confidence,
-      finalScore,
+      finalScore: similarityFinalScore,
       message: `Confidence不足のため見送り: ${confidence.confidence}/${confidence.minConfidence}`,
     };
   }
 
   const rawGate = applyEntryGate({
     confidence: confidence.confidence,
-    similarityScore: finalScore,
+    similarityScore: similarity.adjustedScore,
     weightScore: learning.adjustedScore,
     smcScore: Number(input.features?.smcScore ?? 0),
     atr: Number(input.features?.atr ?? 0),
@@ -189,14 +217,22 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     backtestWinRate1m: Number(input.features?.backtestWinRate1m ?? 0),
   });
 
-  const gate = relaxEntryGateForColdStart({
+  const coldStartGate = relaxEntryGateForColdStart({
     coldStartEnabled: coldStartDemoMode.enabled,
     gate: rawGate,
     confidence: confidence.confidence,
-    finalScore,
+    finalScore: similarityFinalScore,
   });
 
-  const shouldSkipByGate = !gate.allow && !coldStartDemoMode.enabled;
+  const gate = bypassEntryGateForVerification({
+    verificationEnabled: verificationMode.enabled,
+    gate: coldStartGate,
+  });
+
+  const shouldSkipByGate =
+    !gate.allow &&
+    !coldStartDemoMode.enabled &&
+    !verificationMode.enabled;
 
   if (shouldSkipByGate) {
     return {
@@ -204,13 +240,44 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       stage: "engine_skipped_by_entry_gate",
       demo100: demo100Before,
       coldStartDemoMode,
+      verificationMode,
       learning,
       similarity,
-      scorePerformance,
       confidence,
       entryGate: gate,
-      finalScore,
+      finalScore: similarityFinalScore,
       message: `Entry Gate: ${gate.reasons.join(" / ")}`,
+    };
+  }
+
+  const empiricalGate = applyEmpiricalEntryGate({
+    pair: input.pair,
+    direction: input.direction,
+    score: input.score,
+    finalScore: similarityFinalScore,
+    minTrades: 10,
+    minWinRate: 57,
+  });
+
+  const finalScore = empiricalGate.adjustedScore;
+
+  const shouldSkipByEmpiricalGate =
+    !empiricalGate.allow && !coldStartDemoMode.enabled;
+
+  if (shouldSkipByEmpiricalGate) {
+    return {
+      ok: true,
+      stage: "engine_skipped_by_empirical_entry_gate",
+      demo100: demo100Before,
+      coldStartDemoMode,
+      verificationMode,
+      learning,
+      similarity,
+      confidence,
+      entryGate: gate,
+      empiricalEntryGate: empiricalGate,
+      finalScore,
+      message: `Empirical Entry Gate: ${empiricalGate.reasons.join(" / ")}`,
     };
   }
 
@@ -233,11 +300,12 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       stage: "engine_skipped",
       demo100: demo100Before,
       coldStartDemoMode,
+      verificationMode,
       learning,
       similarity,
-      scorePerformance,
       confidence,
       entryGate: gate,
+      empiricalEntryGate: empiricalGate,
       finalScore,
       demoTrade,
       message: "Final Decision が SKIP のため監視・保存しませんでした",
@@ -252,11 +320,12 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       stage: "engine_error",
       demo100: demo100Before,
       coldStartDemoMode,
+      verificationMode,
       learning,
       similarity,
-      scorePerformance,
       confidence,
       entryGate: gate,
+      empiricalEntryGate: empiricalGate,
       finalScore,
       demoTrade,
       error: "contractId が取得できませんでした",
@@ -297,19 +366,19 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
         aiScore: input.score,
         weightScore: learning.adjustedScore,
         similarityScore: similarity.adjustedScore,
-        scorePerformanceOriginalScore: scorePerformance.originalScore,
-        scorePerformanceAdjustedScore: scorePerformance.adjustedScore,
-        scorePerformanceAdjustment: scorePerformance.adjustment,
-        scorePerformanceBand: scorePerformance.scoreBand,
-        scorePerformanceWinRate: scorePerformance.winRate,
-        scorePerformanceSampleSize: scorePerformance.sampleSize,
-        scorePerformanceConfidence: scorePerformance.confidence,
-        scorePerformanceReasons: scorePerformance.reasons,
         finalScore,
         entryGate: gate.allow,
         entryGateScore: gate.score,
         entryGateReasons: gate.reasons,
+        empiricalEntryGate: empiricalGate.allow,
+        empiricalEntryGateScore: empiricalGate.score,
+        empiricalEntryGateBand: empiricalGate.scoreBand,
+        empiricalEntryGateWinRate: empiricalGate.winRate,
+        empiricalEntryGateSampleSize: empiricalGate.sampleSize,
+        empiricalEntryGateAdjustment: empiricalGate.adjustment,
+        empiricalEntryGateReasons: empiricalGate.reasons,
         coldStartDemoMode: coldStartDemoMode.enabled,
+        verificationMode: verificationMode.enabled,
         effectiveMinConfidence,
       },
     });
@@ -336,11 +405,12 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     stage: monitor.ok ? "engine_completed" : "engine_monitor_failed",
     demo100: demo100After,
     coldStartDemoMode,
+    verificationMode,
     learning,
     similarity,
-    scorePerformance,
     confidence,
     entryGate: gate,
+    empiricalEntryGate: empiricalGate,
     finalScore,
     demoTrade,
     monitor,
@@ -353,7 +423,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       intervalMs: 5_000,
     },
     message: monitor.ok
-      ? "Cold Start Demo → Weight → Similarity → Score Performance → Confidence → Entry Gate → Demo Buy → Contract監視 → SQLite保存 → Demo100確認 完了"
+      ? "Weight → Similarity → Confidence → Entry Gate → Empirical Entry Gate → Demo Buy → Contract監視 → SQLite保存 → Demo100確認 完了"
       : "Demo Buy は成功しましたが Contract監視が完了しませんでした",
   };
 }
