@@ -7,15 +7,11 @@ import {
 } from "@/lib/db/tradeRepository";
 import { applyWeightLearning } from "@/lib/learning/weightLearning";
 import { applySimilarityLearning } from "@/lib/learning/similarityLearning";
-import { calculateConfidence } from "@/lib/learning/confidenceEngine";
+import { evaluateEntry } from "@/lib/entry/evaluateEntry";
 import {
   createTradeResultLineText,
   sendLinePushMessage,
 } from "../line/lineClient";
-import { applyEntryGate } from "@/lib/learning/entryGate";
-import { applyEmpiricalEntryGate } from "@/lib/learning/empiricalEntryGate";
-import { previewFeatureWinRateGate } from "@/lib/learning/featureWinRateGate";
-import { evaluatePatternWeight } from "@/lib/learning/patternWeightLearning";
 import {
   getDemo100Status,
   notifyDemo100CompletedIfNeeded,
@@ -23,7 +19,6 @@ import {
 import { buildFeatureSnapshot } from "@/lib/analysis/featureSnapshotBuilder";
 import { recordEntryFunnelEvent } from "@/lib/learning/entryFunnelStore";
 import type { Demo2RobustCandidateMatch } from "@/lib/learning/demo2RobustCandidateGate";
-import { evaluateRobustHardGatePolicy } from "@/lib/learning/robustHardGatePolicy";
 
 export type TradingEngineInput = {
   accountId: string;
@@ -68,62 +63,6 @@ function getColdStartMinConfidence(params: {
   if (params.demo100CurrentCount >= 100) return params.requestedMinConfidence;
 
   return Math.min(params.requestedMinConfidence, 35);
-}
-
-function relaxEntryGateForColdStart(params: {
-  coldStartEnabled: boolean;
-  gate: ReturnType<typeof applyEntryGate>;
-  confidence: number;
-  finalScore: number;
-}) {
-  if (!params.coldStartEnabled) return params.gate;
-  if (params.gate.allow) return params.gate;
-
-  const dangerousReasons = ["ATR異常", "危険", "急変動", "ボラ異常"];
-
-  const hasDangerousReason = params.gate.reasons.some((reason) =>
-    dangerousReasons.some((danger) => reason.includes(danger))
-  );
-
-  if (hasDangerousReason) return params.gate;
-
-  const canRelax =
-    params.confidence >= 35 &&
-    params.finalScore >= 75 &&
-    params.gate.reasons.every(
-      (reason) =>
-        ["Confidence不足", "SMC不足", "1分Backtest弱い"].some((allowed) =>
-          reason.includes(allowed)
-        ) || reason.includes("OK")
-    );
-
-  if (!canRelax) return params.gate;
-
-  return {
-    ...params.gate,
-    allow: true,
-    reasons: [
-      ...params.gate.reasons,
-      "Cold Start Demo Mode: 100件収集のためEntry Gateを一時緩和",
-    ],
-  };
-}
-
-function bypassEntryGateForVerification(params: {
-  verificationEnabled: boolean;
-  gate: ReturnType<typeof applyEntryGate>;
-}) {
-  if (!params.verificationEnabled) return params.gate;
-  if (params.gate.allow) return params.gate;
-
-  return {
-    ...params.gate,
-    allow: true,
-    reasons: [
-      ...params.gate.reasons,
-      "Verification Mode: Empirical Entry Gate確認のため通常Entry Gateを一時バイパス",
-    ],
-  };
 }
 
 export async function executeDemoTradingEngine(input: TradingEngineInput) {
@@ -217,310 +156,75 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     features: input.features ?? null,
   });
 
-  const confidence = calculateConfidence({
-    baseScore: input.score,
-    weightAdjustedScore: learning.adjustedScore,
+  const entry = evaluateEntry({
+    pair: input.pair,
+    direction: effectiveDirection,
+    score: input.score,
+    features: input.features,
+    learning,
     similarity,
     minConfidence: effectiveMinConfidence,
-  });
-
-  const similarityFinalScore = similarity.adjustedScore;
-
-  const shouldSkipByConfidence =
-    !confidence.trade &&
-    !coldStartDemoMode.enabled &&
-    !verificationMode.enabled &&
-    !robustDemo2Mode.enabled;
-
-  if (shouldSkipByConfidence) {
-    recordEntryFunnelEvent({
-      stage: "engine_skipped_by_confidence",
-      aiVersion: CURRENT_AI_VERSION,
-      pair: input.pair,
-      direction: effectiveDirection,
-      inputScore: input.score,
-      finalScore: similarityFinalScore,
-      confidence: confidence.confidence,
-      reason: `Confidence不足: ${confidence.confidence}/${confidence.minConfidence}`,
-    });
-
-    return {
-      ok: true,
-      stage: "engine_skipped_by_confidence",
-      demo100: demo100Before,
-      coldStartDemoMode,
-      verificationMode,
-      robustDemo2Mode,
-      learning,
-      similarity,
-      confidence,
-      finalScore: similarityFinalScore,
-      message: `Confidence不足のため見送り: ${confidence.confidence}/${confidence.minConfidence}`,
-    };
-  }
-
-  const rawGate = applyEntryGate({
-    confidence: confidence.confidence,
-    similarityScore: similarity.adjustedScore,
-    weightScore: learning.adjustedScore,
-    smcScore: Number(input.features?.smcScore ?? 0),
-    atr: Number(input.features?.atr ?? 0),
-    atrThreshold: Number(input.features?.atrThreshold ?? 0),
-    backtestWinRate1m: Number(input.features?.backtestWinRate1m ?? 0),
-  });
-
-  const coldStartGate = relaxEntryGateForColdStart({
     coldStartEnabled: coldStartDemoMode.enabled,
-    gate: rawGate,
-    confidence: confidence.confidence,
-    finalScore: similarityFinalScore,
-  });
-
-  const gate = bypassEntryGateForVerification({
     verificationEnabled: verificationMode.enabled,
-    gate: coldStartGate,
+    robustCandidate: robustDemo2Mode.candidate,
   });
 
-  const shouldSkipByGate =
-    !gate.allow &&
-    !coldStartDemoMode.enabled &&
-    !verificationMode.enabled &&
-    !robustDemo2Mode.enabled;
-
-  if (shouldSkipByGate) {
+  if (!entry.allow) {
     recordEntryFunnelEvent({
-      stage: "engine_skipped_by_entry_gate",
+      stage: entry.rejectStage,
       aiVersion: CURRENT_AI_VERSION,
       pair: input.pair,
       direction: effectiveDirection,
       inputScore: input.score,
-      finalScore: similarityFinalScore,
-      confidence: confidence.confidence,
-      reason: gate.reasons.join(" / "),
-      details: { entryGate: gate },
+      finalScore: entry.finalScore,
+      confidence: entry.confidence.confidence,
+      featureGateAllow: entry.featureWinRateGate?.allow,
+      patternWeightAllow: entry.patternWeight?.allow,
+      hasFeatureHardGate: entry.hasFeatureHardGate,
+      hasPatternHardGate: entry.hasPatternHardGate,
+      reason: entry.reason,
+      details: {
+        entryGate: entry.entryGate,
+        empiricalEntryGate: entry.empiricalEntryGate,
+        featureWinRateGate: entry.featureWinRateGate,
+        patternWeight: entry.patternWeight,
+        robustHardGatePolicy: entry.robustHardGatePolicy,
+      },
     });
 
     return {
       ok: true,
-      stage: "engine_skipped_by_entry_gate",
+      stage: entry.rejectStage,
       demo100: demo100Before,
       coldStartDemoMode,
       verificationMode,
       robustDemo2Mode,
+      aiVersion: CURRENT_AI_VERSION,
       learning,
       similarity,
-      confidence,
-      entryGate: gate,
-      finalScore: similarityFinalScore,
-      message: `Entry Gate: ${gate.reasons.join(" / ")}`,
+      confidence: entry.confidence,
+      entryGate: entry.entryGate,
+      empiricalEntryGate: entry.empiricalEntryGate,
+      featureWinRateGate: entry.featureWinRateGate,
+      patternWeight: entry.patternWeight,
+      robustHardGatePolicy: entry.robustHardGatePolicy,
+      featureSnapshot: entry.featureSnapshot,
+      finalScore: entry.finalScore,
+      message: entry.message,
     };
   }
 
-  const empiricalGate = applyEmpiricalEntryGate({
-    pair: input.pair,
-    direction: effectiveDirection,
-    score: input.score,
-    finalScore: similarityFinalScore,
-    minTrades: 10,
-    minWinRate: 57,
-  });
-
+  const {
+    confidence,
+    entryGate: gate,
+    empiricalEntryGate: empiricalGate,
+    featureWinRateGate: featureGate,
+    patternWeight,
+    robustHardGatePolicy,
+    featureSnapshot: featureGateInputSnapshot,
+    finalScore,
+  } = entry;
   const empiricalScore = empiricalGate.adjustedScore;
-
-  const shouldSkipByEmpiricalGate =
-    !empiricalGate.allow && !coldStartDemoMode.enabled && !robustDemo2Mode.enabled;
-
-  if (shouldSkipByEmpiricalGate) {
-    recordEntryFunnelEvent({
-      stage: "engine_skipped_by_empirical_entry_gate",
-      aiVersion: CURRENT_AI_VERSION,
-      pair: input.pair,
-      direction: effectiveDirection,
-      inputScore: input.score,
-      finalScore: empiricalScore,
-      confidence: confidence.confidence,
-      reason: empiricalGate.reasons.join(" / "),
-      details: { empiricalEntryGate: empiricalGate },
-    });
-
-    return {
-      ok: true,
-      stage: "engine_skipped_by_empirical_entry_gate",
-      demo100: demo100Before,
-      coldStartDemoMode,
-      verificationMode,
-      robustDemo2Mode,
-      learning,
-      similarity,
-      confidence,
-      entryGate: gate,
-      empiricalEntryGate: empiricalGate,
-      finalScore: empiricalScore,
-      message: `Empirical Entry Gate: ${empiricalGate.reasons.join(" / ")}`,
-    };
-  }
-
-  // Phase15-N:
-  // Danger Pattern Hard GateをFeature WinRate Gateへ接続。
-  // Demo Part2中でも危険パターンはverificationModeでバイパスしない。
-  // Phase15-F Step3-B:
-  // Feature WinRate GateをTrading Engineへ接続。
-  // APIコールは増やさず、SQLiteに保存済みの実績だけで補正する。
-  // 先に標準化Snapshotを仮生成し、EMA/RCI/ATR/SMCなどの表記ゆれを潰してからGateへ渡す。
-  const featureGateInputSnapshot = buildFeatureSnapshot({
-    pair: input.pair,
-    direction: effectiveDirection,
-    score: input.score,
-    weightScore: learning.adjustedScore,
-    similarityScore: similarity.adjustedScore,
-    finalScore: empiricalScore,
-    features: {
-      ...(input.features ?? {}),
-      aiScore: input.score,
-      weightScore: learning.adjustedScore,
-      similarityScore: similarity.adjustedScore,
-      finalScore: empiricalScore,
-      source: "trading_engine_phase15_f_step3_b_feature_gate_input",
-    },
-  });
-
-  const featureGate = previewFeatureWinRateGate({
-    pair: input.pair,
-    direction: effectiveDirection,
-    score: input.score,
-    finalScore: empiricalScore,
-    weightScore: learning.adjustedScore,
-    similarityScore: similarity.adjustedScore,
-    features: featureGateInputSnapshot,
-  });
-
-  const hasFeatureHardGate = featureGate.applied.some(
-    (candidate: any) => candidate.action === "SKIP_CANDIDATE",
-  );
-
-  const featureHardGatePolicy = evaluateRobustHardGatePolicy({
-    candidate: robustDemo2Mode.candidate,
-    featureApplied: featureGate.applied,
-    patternApplied: [],
-  });
-
-  const shouldSkipByFeatureGate =
-    !featureGate.allow &&
-    !coldStartDemoMode.enabled &&
-    !(
-      robustDemo2Mode.enabled &&
-      (!hasFeatureHardGate || featureHardGatePolicy.canOverrideFeatureHardGate)
-    );
-
-  if (shouldSkipByFeatureGate) {
-    recordEntryFunnelEvent({
-      stage: "engine_skipped_by_feature_win_rate_gate",
-      aiVersion: CURRENT_AI_VERSION,
-      pair: input.pair,
-      direction: effectiveDirection,
-      inputScore: input.score,
-      finalScore: featureGate.adjustedScore,
-      confidence: confidence.confidence,
-      featureGateAllow: featureGate.allow,
-      hasFeatureHardGate,
-      reason: featureGate.reasons.join(" / "),
-      details: { applied: featureGate.applied, featureHardGatePolicy },
-    });
-
-    return {
-      ok: true,
-      stage: "engine_skipped_by_feature_win_rate_gate",
-      demo100: demo100Before,
-      coldStartDemoMode,
-      verificationMode,
-      robustDemo2Mode,
-      learning,
-      similarity,
-      confidence,
-      entryGate: gate,
-      empiricalEntryGate: empiricalGate,
-      featureWinRateGate: featureGate,
-      robustHardGatePolicy: featureHardGatePolicy,
-      featureSnapshot: featureGateInputSnapshot,
-      finalScore: featureGate.adjustedScore,
-      message: `Feature WinRate Gate: ${featureGate.reasons.join(" / ")}`,
-    };
-  }
-
-  // Phase15-N:
-  // Pattern Weight側のDanger Pattern Hard GateもTrading Engine本体で強制停止する。
-  // Phase15-J2:
-  // Pattern Weight LearningをTrading Engine本体へ接続。
-  // Feature WinRate Gate後のスコアを、危険パターン実績でさらに補正する。
-  // APIコールは増やさず、SQLiteの保存済み実績のみ参照する。
-  const patternWeight = evaluatePatternWeight({
-    pair: input.pair,
-    direction: effectiveDirection,
-    score: input.score,
-    finalScore: featureGate.adjustedScore,
-    weightScore: learning.adjustedScore,
-    similarityScore: similarity.adjustedScore,
-    features: featureGateInputSnapshot,
-  });
-
-  const hasPatternHardGate = patternWeight.applied.some(
-    (signal: any) => signal.action === "SKIP_CANDIDATE",
-  );
-
-  const robustHardGatePolicy = evaluateRobustHardGatePolicy({
-    candidate: robustDemo2Mode.candidate,
-    featureApplied: featureGate.applied,
-    patternApplied: patternWeight.applied,
-  });
-
-  const shouldSkipByPatternWeight =
-    !patternWeight.allow &&
-    !coldStartDemoMode.enabled &&
-    (!robustDemo2Mode.enabled || hasPatternHardGate);
-
-  if (shouldSkipByPatternWeight) {
-    recordEntryFunnelEvent({
-      stage: "engine_skipped_by_pattern_weight",
-      aiVersion: CURRENT_AI_VERSION,
-      pair: input.pair,
-      direction: effectiveDirection,
-      inputScore: input.score,
-      finalScore: patternWeight.adjustedScore,
-      confidence: confidence.confidence,
-      featureGateAllow: featureGate.allow,
-      patternWeightAllow: patternWeight.allow,
-      hasPatternHardGate,
-      reason: patternWeight.reasons.join(" / "),
-      details: { applied: patternWeight.applied, robustHardGatePolicy },
-    });
-
-    return {
-      ok: true,
-      stage: "engine_skipped_by_pattern_weight",
-      demo100: demo100Before,
-      coldStartDemoMode,
-      verificationMode,
-      aiVersion: CURRENT_AI_VERSION,
-      learning,
-      similarity,
-      confidence,
-      entryGate: gate,
-      empiricalEntryGate: empiricalGate,
-      featureWinRateGate: featureGate,
-      patternWeight,
-      robustHardGatePolicy,
-      featureSnapshot: featureGateInputSnapshot,
-      finalScore: patternWeight.adjustedScore,
-      message: `Pattern Weight: ${patternWeight.reasons.join(" / ")}`,
-    };
-  }
-
-  const finalScore = robustDemo2Mode.enabled
-    ? Math.max(
-        patternWeight.adjustedScore,
-        input.demoPart2RobustCandidate?.directionalScore ?? 40,
-      )
-    : patternWeight.adjustedScore;
 
   const snapshot = buildFeatureSnapshot({
     pair: input.pair,
