@@ -1,6 +1,7 @@
 import { buildFeatureSnapshot } from "@/lib/analysis/featureSnapshotBuilder";
 import type { TradeFeatureSnapshot } from "@/lib/db/tradeRepository";
 import { createGateEvaluationId, recordGateLog } from "@/lib/entry/gateLogger";
+import { recordRejectLog, type RejectStage } from "@/lib/entry/rejectLogger";
 import { calculateConfidence } from "@/lib/learning/confidenceEngine";
 import type { Demo2RobustCandidateMatch } from "@/lib/learning/demo2RobustCandidateGate";
 import { applyEmpiricalEntryGate } from "@/lib/learning/empiricalEntryGate";
@@ -28,12 +29,7 @@ export type EntryEvaluationInput = {
   aiVersion?: string | null;
 };
 
-export type EntryRejectStage =
-  | "engine_skipped_by_confidence"
-  | "engine_skipped_by_entry_gate"
-  | "engine_skipped_by_empirical_entry_gate"
-  | "engine_skipped_by_feature_win_rate_gate"
-  | "engine_skipped_by_pattern_weight";
+export type EntryRejectStage = RejectStage;
 
 type ConfidenceResult = ReturnType<typeof calculateConfidence>;
 type EntryGateResult = ReturnType<typeof applyEntryGate>;
@@ -150,6 +146,22 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     direction: input.direction,
     inputScore: input.score,
   });
+  const logReject = (params: Omit<Parameters<typeof recordRejectLog>[0],
+    | "evaluationId"
+    | "aiVersion"
+    | "pair"
+    | "direction"
+    | "inputScore"
+    | "confidence"
+  >) => recordRejectLog({
+    ...params,
+    evaluationId,
+    aiVersion: input.aiVersion,
+    pair: input.pair,
+    direction: input.direction,
+    inputScore: input.score,
+    confidence: confidence.confidence,
+  });
 
   logGate({
     gateName: "confidence",
@@ -166,10 +178,18 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     !input.verificationEnabled &&
     !robustEnabled
   ) {
+    const reason = `Confidence不足: ${confidence.confidence}/${confidence.minConfidence}`;
+    logReject({
+      rejectStage: "engine_skipped_by_confidence",
+      finalScore: similarityFinalScore,
+      reason,
+      featureSnapshot: input.features ?? undefined,
+      details: { confidence },
+    });
     return {
       allow: false as const,
       rejectStage: "engine_skipped_by_confidence" as const,
-      reason: `Confidence不足: ${confidence.confidence}/${confidence.minConfidence}`,
+      reason,
       message: `Confidence不足のため見送り: ${confidence.confidence}/${confidence.minConfidence}`,
       finalScore: similarityFinalScore,
       confidence,
@@ -210,10 +230,18 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     !input.verificationEnabled &&
     !robustEnabled
   ) {
+    const reason = entryGate.reasons.join(" / ");
+    logReject({
+      rejectStage: "engine_skipped_by_entry_gate",
+      finalScore: similarityFinalScore,
+      reason,
+      featureSnapshot: input.features ?? undefined,
+      details: { confidence, entryGate },
+    });
     return {
       allow: false as const,
       rejectStage: "engine_skipped_by_entry_gate" as const,
-      reason: entryGate.reasons.join(" / "),
+      reason,
       message: `Entry Gate: ${entryGate.reasons.join(" / ")}`,
       finalScore: similarityFinalScore,
       confidence,
@@ -240,10 +268,18 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
   });
 
   if (!empiricalEntryGate.allow && !input.coldStartEnabled && !robustEnabled) {
+    const reason = empiricalEntryGate.reasons.join(" / ");
+    logReject({
+      rejectStage: "engine_skipped_by_empirical_entry_gate",
+      finalScore: empiricalScore,
+      reason,
+      featureSnapshot: input.features ?? undefined,
+      details: { confidence, entryGate, empiricalEntryGate },
+    });
     return {
       allow: false as const,
       rejectStage: "engine_skipped_by_empirical_entry_gate" as const,
-      reason: empiricalEntryGate.reasons.join(" / "),
+      reason,
       message: `Empirical Entry Gate: ${empiricalEntryGate.reasons.join(" / ")}`,
       finalScore: empiricalScore,
       confidence,
@@ -310,10 +346,24 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
       (!hasFeatureHardGate || featureHardGatePolicy.canOverrideFeatureHardGate)
     )
   ) {
+    const reason = featureWinRateGate.reasons.join(" / ");
+    logReject({
+      rejectStage: "engine_skipped_by_feature_win_rate_gate",
+      finalScore: featureWinRateGate.adjustedScore,
+      reason,
+      featureSnapshot,
+      details: {
+        confidence,
+        entryGate,
+        empiricalEntryGate,
+        featureWinRateGate,
+        robustHardGatePolicy: featureHardGatePolicy,
+      },
+    });
     return {
       allow: false as const,
       rejectStage: "engine_skipped_by_feature_win_rate_gate" as const,
-      reason: featureWinRateGate.reasons.join(" / "),
+      reason,
       message: `Feature WinRate Gate: ${featureWinRateGate.reasons.join(" / ")}`,
       finalScore: featureWinRateGate.adjustedScore,
       confidence,
@@ -364,10 +414,25 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     !input.coldStartEnabled &&
     (!robustEnabled || hasPatternHardGate)
   ) {
+    const reason = patternWeight.reasons.join(" / ");
+    logReject({
+      rejectStage: "engine_skipped_by_pattern_weight",
+      finalScore: patternWeight.adjustedScore,
+      reason,
+      featureSnapshot,
+      details: {
+        confidence,
+        entryGate,
+        empiricalEntryGate,
+        featureWinRateGate,
+        patternWeight,
+        robustHardGatePolicy,
+      },
+    });
     return {
       allow: false as const,
       rejectStage: "engine_skipped_by_pattern_weight" as const,
-      reason: patternWeight.reasons.join(" / "),
+      reason,
       message: `Pattern Weight: ${patternWeight.reasons.join(" / ")}`,
       finalScore: patternWeight.adjustedScore,
       confidence,
