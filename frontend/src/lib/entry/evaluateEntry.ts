@@ -1,6 +1,7 @@
 import { buildFeatureSnapshot } from "@/lib/analysis/featureSnapshotBuilder";
 import type { TradeFeatureSnapshot } from "@/lib/db/tradeRepository";
 import { createGateEvaluationId, recordGateLog } from "@/lib/entry/gateLogger";
+import { recordNearMiss } from "@/lib/entry/nearMissLogger";
 import { recordRejectLog, type RejectStage } from "@/lib/entry/rejectLogger";
 import { calculateConfidence } from "@/lib/learning/confidenceEngine";
 import type { Demo2RobustCandidateMatch } from "@/lib/learning/demo2RobustCandidateGate";
@@ -162,6 +163,20 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     inputScore: input.score,
     confidence: confidence.confidence,
   });
+  const logNearMiss = (params: Omit<Parameters<typeof recordNearMiss>[0],
+    | "evaluationId"
+    | "aiVersion"
+    | "pair"
+    | "direction"
+    | "inputScore"
+  >) => recordNearMiss({
+    ...params,
+    evaluationId,
+    aiVersion: input.aiVersion,
+    pair: input.pair,
+    direction: input.direction,
+    inputScore: input.score,
+  });
 
   logGate({
     gateName: "confidence",
@@ -181,6 +196,17 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     const reason = `Confidence不足: ${confidence.confidence}/${confidence.minConfidence}`;
     logReject({
       rejectStage: "engine_skipped_by_confidence",
+      finalScore: similarityFinalScore,
+      reason,
+      featureSnapshot: input.features ?? undefined,
+      details: { confidence },
+    });
+    logNearMiss({
+      rejectStage: "engine_skipped_by_confidence",
+      metric: "confidence",
+      observedValue: confidence.confidence,
+      thresholdValue: confidence.minConfidence,
+      maxGap: 5,
       finalScore: similarityFinalScore,
       reason,
       featureSnapshot: input.features ?? undefined,
@@ -238,6 +264,17 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
       featureSnapshot: input.features ?? undefined,
       details: { confidence, entryGate },
     });
+    logNearMiss({
+      rejectStage: "engine_skipped_by_entry_gate",
+      metric: "entry_gate_score",
+      observedValue: entryGate.score,
+      thresholdValue: 80,
+      maxGap: 5,
+      finalScore: similarityFinalScore,
+      reason,
+      featureSnapshot: input.features ?? undefined,
+      details: { confidence, entryGate },
+    });
     return {
       allow: false as const,
       rejectStage: "engine_skipped_by_entry_gate" as const,
@@ -276,6 +313,22 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
       featureSnapshot: input.features ?? undefined,
       details: { confidence, entryGate, empiricalEntryGate },
     });
+    if (
+      empiricalEntryGate.winRate !== null &&
+      empiricalEntryGate.sampleSize >= 10
+    ) {
+      logNearMiss({
+        rejectStage: "engine_skipped_by_empirical_entry_gate",
+        metric: "empirical_win_rate",
+        observedValue: empiricalEntryGate.winRate,
+        thresholdValue: 50,
+        maxGap: 5,
+        finalScore: empiricalScore,
+        reason,
+        featureSnapshot: input.features ?? undefined,
+        details: { confidence, entryGate, empiricalEntryGate },
+      });
+    }
     return {
       allow: false as const,
       rejectStage: "engine_skipped_by_empirical_entry_gate" as const,
