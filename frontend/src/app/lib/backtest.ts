@@ -2,6 +2,8 @@ import type { UTCTimestamp } from "lightweight-charts";
 
 export type Signal = "HIGH" | "LOW" | "見送り" | "危険";
 
+export type Result = "WIN" | "LOSE" | "DRAW";
+
 export type Candle = {
   time: UTCTimestamp;
   open: number;

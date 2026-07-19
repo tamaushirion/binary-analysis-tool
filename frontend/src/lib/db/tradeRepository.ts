@@ -1,27 +1,70 @@
 import db from "./database";
 
 export type TradeFeatureSnapshot = {
+  pair?: string | null;
+  direction?: "HIGH" | "LOW" | string | null;
+
   ema9?: number | null;
   ema21?: number | null;
   emaDiff?: number | null;
+  emaTrend?: "UP" | "DOWN" | "RANGE" | "unknown" | string | null;
+
   rci9?: number | null;
   rci26?: number | null;
   rci52?: number | null;
+  rciDirection?: "UP" | "DOWN" | "MIXED" | "unknown" | string | null;
+
   atr?: number | null;
-  trend?: "UP" | "DOWN" | "RANGE" | string | null;
-  marketPhase?: "TREND" | "RANGE" | "BREAKOUT" | "REVERSAL" | string | null;
-  volatilityLevel?: "LOW" | "NORMAL" | "HIGH" | string | null;
-  session?: "ASIA" | "LONDON" | "NEWYORK" | "OVERLAP" | string | null;
+  atrThreshold?: number | null;
+  atrLevel?: "LOW" | "NORMAL" | "HIGH" | "unknown" | string | null;
+
+  smcScore?: number | null;
   bos?: boolean | null;
   choch?: boolean | null;
   fvg?: boolean | null;
   orderBlock?: boolean | null;
+  order_block?: boolean | null;
+  liquidity?: boolean | null;
+  smcStrength?: "NONE" | "WEAK" | "MEDIUM" | "STRONG" | string | null;
+
+  backtestWinRate1m?: number | null;
+  backtestWinRate3m?: number | null;
+  backtestStrength?: "WEAK" | "NORMAL" | "STRONG" | "unknown" | string | null;
+
+  trend?: "UP" | "DOWN" | "RANGE" | string | null;
+  marketPhase?: "TREND" | "RANGE" | "BREAKOUT" | "REVERSAL" | "VOLATILE" | "unknown" | string | null;
+  volatilityLevel?: "LOW" | "NORMAL" | "HIGH" | "unknown" | string | null;
+  session?: "ASIA" | "TOKYO" | "LONDON" | "NEWYORK" | "NEW_YORK" | "OVERLAP" | "OFF_HOURS" | string | null;
+
   hour?: number | null;
   weekday?: number | null;
+
   aiScore?: number | null;
   weightScore?: number | null;
   similarityScore?: number | null;
   finalScore?: number | null;
+  aiVersion?: string | null;
+
+  entryGate?: boolean | null;
+  entryGateScore?: number | null;
+  entryGateReasons?: string[] | null;
+
+  empiricalEntryGate?: boolean | null;
+  empiricalEntryGateScore?: number | null;
+  empiricalEntryGateBand?: string | null;
+  empiricalEntryGateWinRate?: number | null;
+  empiricalEntryGateSampleSize?: number | null;
+  empiricalEntryGateAdjustment?: number | null;
+  empiricalEntryGateReasons?: string[] | null;
+
+  coldStartDemoMode?: boolean | null;
+  verificationMode?: boolean | null;
+  effectiveMinConfidence?: number | null;
+
+  source?: string | null;
+  createdAtIso?: string | null;
+
+  [key: string]: any;
 };
 
 export type SaveTradeHistoryInput = {
@@ -40,6 +83,7 @@ export type SaveTradeHistoryInput = {
   startTime?: number | null;
   endTime?: number | null;
   features?: TradeFeatureSnapshot | null;
+  aiVersion?: string | null;
 };
 
 function toNumber(value: unknown) {
@@ -49,8 +93,14 @@ function toNumber(value: unknown) {
 }
 
 function toBoolInt(value: unknown) {
-  if (value === true) return 1;
-  if (value === false) return 0;
+  if (value === true || value === 1 || value === "1" || value === "true") {
+    return 1;
+  }
+
+  if (value === false || value === 0 || value === "0" || value === "false") {
+    return 0;
+  }
+
   return null;
 }
 
@@ -107,9 +157,26 @@ function ensureFeatureColumns() {
   ensureColumn("weekday", "weekday INTEGER");
 
   ensureColumn("feature_snapshot", "feature_snapshot TEXT");
+  ensureColumn("ai_version", "ai_version TEXT");
 }
 
 ensureFeatureColumns();
+
+function normalizeTrend(features: TradeFeatureSnapshot | null) {
+  return features?.trend ?? features?.emaTrend ?? null;
+}
+
+function normalizeMarketPhase(features: TradeFeatureSnapshot | null) {
+  return features?.marketPhase ?? null;
+}
+
+function normalizeVolatilityLevel(features: TradeFeatureSnapshot | null) {
+  return features?.volatilityLevel ?? features?.atrLevel ?? null;
+}
+
+function normalizeOrderBlock(features: TradeFeatureSnapshot | null) {
+  return features?.orderBlock ?? features?.order_block ?? null;
+}
 
 export function saveTradeHistory(input: SaveTradeHistoryInput) {
   const features = input.features ?? null;
@@ -117,13 +184,16 @@ export function saveTradeHistory(input: SaveTradeHistoryInput) {
   const hour = features?.hour ?? getHourFromUnix(input.startTime);
   const weekday = features?.weekday ?? getWeekdayFromUnix(input.startTime);
 
+  const aiVersion = input.aiVersion ?? features?.aiVersion ?? null;
+
   const featureSnapshot = features
     ? JSON.stringify({
         ...features,
-        pair: input.pair,
-        direction: input.direction,
-        score: input.score ?? null,
+        pair: features.pair ?? input.pair,
+        direction: features.direction ?? input.direction,
+        score: input.score ?? features.finalScore ?? features.aiScore ?? null,
         payoutRate: input.payoutRate ?? null,
+        aiVersion,
         savedAt: Date.now(),
       })
     : null;
@@ -166,6 +236,7 @@ export function saveTradeHistory(input: SaveTradeHistoryInput) {
       hour,
       weekday,
       feature_snapshot,
+      ai_version,
 
       created_at
     ) VALUES (
@@ -205,6 +276,7 @@ export function saveTradeHistory(input: SaveTradeHistoryInput) {
       @hour,
       @weekday,
       @featureSnapshot,
+      @aiVersion,
 
       @createdAt
     )
@@ -233,20 +305,21 @@ export function saveTradeHistory(input: SaveTradeHistoryInput) {
     rci26: toNumber(features?.rci26),
     rci52: toNumber(features?.rci52),
     atr: toNumber(features?.atr),
-    trend: features?.trend ?? null,
-    marketPhase: features?.marketPhase ?? null,
-    volatilityLevel: features?.volatilityLevel ?? null,
+    trend: normalizeTrend(features),
+    marketPhase: normalizeMarketPhase(features),
+    volatilityLevel: normalizeVolatilityLevel(features),
     session: features?.session ?? null,
     bos: toBoolInt(features?.bos),
     choch: toBoolInt(features?.choch),
     fvg: toBoolInt(features?.fvg),
-    orderBlock: toBoolInt(features?.orderBlock),
+    orderBlock: toBoolInt(normalizeOrderBlock(features)),
     weightScore: toNumber(features?.weightScore),
     similarityScore: toNumber(features?.similarityScore),
     finalScore: toNumber(features?.finalScore),
     hour,
     weekday,
     featureSnapshot,
+    aiVersion,
 
     createdAt: Date.now(),
   });
@@ -488,7 +561,8 @@ export function getSimilarityTradeCandidates(params: {
         final_score as finalScore,
         hour,
         weekday,
-        feature_snapshot as featureSnapshot
+        feature_snapshot as featureSnapshot,
+        ai_version as aiVersion
       FROM trade_history
       WHERE pair = ?
         AND direction = ?
@@ -583,3 +657,29 @@ export function getClosedTradesForValidation(limit = 1000) {
     weekday: number | null;
   }>;
 }
+
+/**
+ * Phase15-L 追加用スニペット
+ *
+ * tradeRepository.ts のDB初期化付近に追加:
+ */
+
+export function ensureAiVersionColumn(db: any) {
+  const columns = db.prepare("PRAGMA table_info(trade_history)").all();
+  const hasAiVersion = columns.some((c: any) => c.name === "ai_version");
+
+  if (!hasAiVersion) {
+    db.prepare("ALTER TABLE trade_history ADD COLUMN ai_version TEXT").run();
+  }
+}
+
+/**
+ * saveTradeHistory のINSERT対象に以下を追加:
+ *
+ * ai_version
+ *
+ * value:
+ * input.aiVersion ?? CURRENT_AI_VERSION
+ *
+ * 既存のinsertに ai_version を追加するだけ。
+ */

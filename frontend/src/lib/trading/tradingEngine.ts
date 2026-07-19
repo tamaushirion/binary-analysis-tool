@@ -1,3 +1,4 @@
+import { CURRENT_AI_VERSION } from "@/lib/versioning/aiVersion";
 import { executeDemoTrade } from "@/lib/deriv/demoTrade";
 import { monitorDerivContract } from "@/lib/deriv/contractMonitor";
 import {
@@ -13,10 +14,16 @@ import {
 } from "../line/lineClient";
 import { applyEntryGate } from "@/lib/learning/entryGate";
 import { applyEmpiricalEntryGate } from "@/lib/learning/empiricalEntryGate";
+import { previewFeatureWinRateGate } from "@/lib/learning/featureWinRateGate";
+import { evaluatePatternWeight } from "@/lib/learning/patternWeightLearning";
 import {
   getDemo100Status,
   notifyDemo100CompletedIfNeeded,
 } from "@/lib/demo100Mode";
+import { buildFeatureSnapshot } from "@/lib/analysis/featureSnapshotBuilder";
+import { recordEntryFunnelEvent } from "@/lib/learning/entryFunnelStore";
+import type { Demo2RobustCandidateMatch } from "@/lib/learning/demo2RobustCandidateGate";
+import { evaluateRobustHardGatePolicy } from "@/lib/learning/robustHardGatePolicy";
 
 export type TradingEngineInput = {
   accountId: string;
@@ -33,12 +40,15 @@ export type TradingEngineInput = {
   features?: TradeFeatureSnapshot | null;
 
   /**
-   * Phase15-E検証専用。
+   * Phase15-E/F検証専用。
    * true の時だけ Demo100 completed 停止と通常Gate停止を通過して、
-   * Empirical Entry Gate の判定まで確認できる。
+   * Empirical Entry Gate / Feature Snapshot保存の確認まで進める。
    * 通常運用・Auto Runnerでは指定しない。
    */
   debugBypassDemo100Completed?: boolean;
+
+  /** Demo Part2限定。承認済みRobust候補一致時だけ通常のSoft Gateを限定的に通過する。 */
+  demoPart2RobustCandidate?: Demo2RobustCandidateMatch | null;
 };
 
 function durationToMs(duration: number, unit: "s" | "m" | "h" | "d") {
@@ -159,20 +169,49 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
   const verificationMode = {
     enabled: debugBypassDemo100Completed,
     reason: debugBypassDemo100Completed
-      ? "Phase15-E検証用: Demo100完了停止・通常Entry Gate停止を一時バイパス"
+      ? "Phase15-F検証用: Demo100完了停止・通常Entry Gate停止を一時バイパス"
       : "通常運用",
   };
 
+  const effectiveDirection: "HIGH" | "LOW" = input.demoPart2RobustCandidate?.enabled === true ? input.demoPart2RobustCandidate.direction : input.direction;
+
+  const robustDemo2Mode = {
+    enabled: input.demoPart2RobustCandidate?.enabled === true,
+    candidate: input.demoPart2RobustCandidate ?? null,
+    reason:
+      input.demoPart2RobustCandidate?.enabled === true
+        ? `Demo Part2 Robust候補: ${input.demoPart2RobustCandidate.candidateName}`
+        : "通常Gate判定",
+  };
+
+  const robustPipeline = {
+    enabled: robustDemo2Mode.enabled,
+    effectiveDirection,
+    originalDirection: input.direction,
+    candidateId: robustDemo2Mode.candidate?.candidateId ?? null,
+    candidateName: robustDemo2Mode.candidate?.candidateName ?? null,
+    policy: robustDemo2Mode.enabled ? "Robust候補専用Pipeline" : "通常Pipeline",
+  };
+
+  recordEntryFunnelEvent({
+    stage: "engine_started",
+    aiVersion: CURRENT_AI_VERSION,
+    pair: input.pair,
+    direction: effectiveDirection,
+    inputScore: input.score,
+    reason: "Trading Engineに到達した候補を記録",
+  });
+
   const learning = applyWeightLearning({
     pair: input.pair,
-    direction: input.direction,
+    direction: effectiveDirection,
     score: input.score,
     payoutRate: null,
   });
 
   const similarity = applySimilarityLearning({
     pair: input.pair,
-    direction: input.direction,
+    direction: effectiveDirection,
     score: learning.adjustedScore,
     payoutRate: null,
     features: input.features ?? null,
@@ -190,15 +229,28 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
   const shouldSkipByConfidence =
     !confidence.trade &&
     !coldStartDemoMode.enabled &&
-    !verificationMode.enabled;
+    !verificationMode.enabled &&
+    !robustDemo2Mode.enabled;
 
   if (shouldSkipByConfidence) {
+    recordEntryFunnelEvent({
+      stage: "engine_skipped_by_confidence",
+      aiVersion: CURRENT_AI_VERSION,
+      pair: input.pair,
+      direction: effectiveDirection,
+      inputScore: input.score,
+      finalScore: similarityFinalScore,
+      confidence: confidence.confidence,
+      reason: `Confidence不足: ${confidence.confidence}/${confidence.minConfidence}`,
+    });
+
     return {
       ok: true,
       stage: "engine_skipped_by_confidence",
       demo100: demo100Before,
       coldStartDemoMode,
       verificationMode,
+      robustDemo2Mode,
       learning,
       similarity,
       confidence,
@@ -232,15 +284,29 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
   const shouldSkipByGate =
     !gate.allow &&
     !coldStartDemoMode.enabled &&
-    !verificationMode.enabled;
+    !verificationMode.enabled &&
+    !robustDemo2Mode.enabled;
 
   if (shouldSkipByGate) {
+    recordEntryFunnelEvent({
+      stage: "engine_skipped_by_entry_gate",
+      aiVersion: CURRENT_AI_VERSION,
+      pair: input.pair,
+      direction: effectiveDirection,
+      inputScore: input.score,
+      finalScore: similarityFinalScore,
+      confidence: confidence.confidence,
+      reason: gate.reasons.join(" / "),
+      details: { entryGate: gate },
+    });
+
     return {
       ok: true,
       stage: "engine_skipped_by_entry_gate",
       demo100: demo100Before,
       coldStartDemoMode,
       verificationMode,
+      robustDemo2Mode,
       learning,
       similarity,
       confidence,
@@ -252,60 +318,306 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
 
   const empiricalGate = applyEmpiricalEntryGate({
     pair: input.pair,
-    direction: input.direction,
+    direction: effectiveDirection,
     score: input.score,
     finalScore: similarityFinalScore,
     minTrades: 10,
     minWinRate: 57,
   });
 
-  const finalScore = empiricalGate.adjustedScore;
+  const empiricalScore = empiricalGate.adjustedScore;
 
   const shouldSkipByEmpiricalGate =
-    !empiricalGate.allow && !coldStartDemoMode.enabled;
+    !empiricalGate.allow && !coldStartDemoMode.enabled && !robustDemo2Mode.enabled;
 
   if (shouldSkipByEmpiricalGate) {
+    recordEntryFunnelEvent({
+      stage: "engine_skipped_by_empirical_entry_gate",
+      aiVersion: CURRENT_AI_VERSION,
+      pair: input.pair,
+      direction: effectiveDirection,
+      inputScore: input.score,
+      finalScore: empiricalScore,
+      confidence: confidence.confidence,
+      reason: empiricalGate.reasons.join(" / "),
+      details: { empiricalEntryGate: empiricalGate },
+    });
+
     return {
       ok: true,
       stage: "engine_skipped_by_empirical_entry_gate",
       demo100: demo100Before,
       coldStartDemoMode,
       verificationMode,
+      robustDemo2Mode,
       learning,
       similarity,
       confidence,
       entryGate: gate,
       empiricalEntryGate: empiricalGate,
-      finalScore,
+      finalScore: empiricalScore,
       message: `Empirical Entry Gate: ${empiricalGate.reasons.join(" / ")}`,
     };
   }
 
+  // Phase15-N:
+  // Danger Pattern Hard GateをFeature WinRate Gateへ接続。
+  // Demo Part2中でも危険パターンはverificationModeでバイパスしない。
+  // Phase15-F Step3-B:
+  // Feature WinRate GateをTrading Engineへ接続。
+  // APIコールは増やさず、SQLiteに保存済みの実績だけで補正する。
+  // 先に標準化Snapshotを仮生成し、EMA/RCI/ATR/SMCなどの表記ゆれを潰してからGateへ渡す。
+  const featureGateInputSnapshot = buildFeatureSnapshot({
+    pair: input.pair,
+    direction: effectiveDirection,
+    score: input.score,
+    weightScore: learning.adjustedScore,
+    similarityScore: similarity.adjustedScore,
+    finalScore: empiricalScore,
+    features: {
+      ...(input.features ?? {}),
+      aiScore: input.score,
+      weightScore: learning.adjustedScore,
+      similarityScore: similarity.adjustedScore,
+      finalScore: empiricalScore,
+      source: "trading_engine_phase15_f_step3_b_feature_gate_input",
+    },
+  });
+
+  const featureGate = previewFeatureWinRateGate({
+    pair: input.pair,
+    direction: effectiveDirection,
+    score: input.score,
+    finalScore: empiricalScore,
+    weightScore: learning.adjustedScore,
+    similarityScore: similarity.adjustedScore,
+    features: featureGateInputSnapshot,
+  });
+
+  const hasFeatureHardGate = featureGate.applied.some(
+    (candidate: any) => candidate.action === "SKIP_CANDIDATE",
+  );
+
+  const featureHardGatePolicy = evaluateRobustHardGatePolicy({
+    candidate: robustDemo2Mode.candidate,
+    featureApplied: featureGate.applied,
+    patternApplied: [],
+  });
+
+  const shouldSkipByFeatureGate =
+    !featureGate.allow &&
+    !coldStartDemoMode.enabled &&
+    !(
+      robustDemo2Mode.enabled &&
+      (!hasFeatureHardGate || featureHardGatePolicy.canOverrideFeatureHardGate)
+    );
+
+  if (shouldSkipByFeatureGate) {
+    recordEntryFunnelEvent({
+      stage: "engine_skipped_by_feature_win_rate_gate",
+      aiVersion: CURRENT_AI_VERSION,
+      pair: input.pair,
+      direction: effectiveDirection,
+      inputScore: input.score,
+      finalScore: featureGate.adjustedScore,
+      confidence: confidence.confidence,
+      featureGateAllow: featureGate.allow,
+      hasFeatureHardGate,
+      reason: featureGate.reasons.join(" / "),
+      details: { applied: featureGate.applied, featureHardGatePolicy },
+    });
+
+    return {
+      ok: true,
+      stage: "engine_skipped_by_feature_win_rate_gate",
+      demo100: demo100Before,
+      coldStartDemoMode,
+      verificationMode,
+      robustDemo2Mode,
+      learning,
+      similarity,
+      confidence,
+      entryGate: gate,
+      empiricalEntryGate: empiricalGate,
+      featureWinRateGate: featureGate,
+      robustHardGatePolicy: featureHardGatePolicy,
+      featureSnapshot: featureGateInputSnapshot,
+      finalScore: featureGate.adjustedScore,
+      message: `Feature WinRate Gate: ${featureGate.reasons.join(" / ")}`,
+    };
+  }
+
+  // Phase15-N:
+  // Pattern Weight側のDanger Pattern Hard GateもTrading Engine本体で強制停止する。
+  // Phase15-J2:
+  // Pattern Weight LearningをTrading Engine本体へ接続。
+  // Feature WinRate Gate後のスコアを、危険パターン実績でさらに補正する。
+  // APIコールは増やさず、SQLiteの保存済み実績のみ参照する。
+  const patternWeight = evaluatePatternWeight({
+    pair: input.pair,
+    direction: effectiveDirection,
+    score: input.score,
+    finalScore: featureGate.adjustedScore,
+    weightScore: learning.adjustedScore,
+    similarityScore: similarity.adjustedScore,
+    features: featureGateInputSnapshot,
+  });
+
+  const hasPatternHardGate = patternWeight.applied.some(
+    (signal: any) => signal.action === "SKIP_CANDIDATE",
+  );
+
+  const robustHardGatePolicy = evaluateRobustHardGatePolicy({
+    candidate: robustDemo2Mode.candidate,
+    featureApplied: featureGate.applied,
+    patternApplied: patternWeight.applied,
+  });
+
+  const shouldSkipByPatternWeight =
+    !patternWeight.allow &&
+    !coldStartDemoMode.enabled &&
+    (!robustDemo2Mode.enabled || hasPatternHardGate);
+
+  if (shouldSkipByPatternWeight) {
+    recordEntryFunnelEvent({
+      stage: "engine_skipped_by_pattern_weight",
+      aiVersion: CURRENT_AI_VERSION,
+      pair: input.pair,
+      direction: effectiveDirection,
+      inputScore: input.score,
+      finalScore: patternWeight.adjustedScore,
+      confidence: confidence.confidence,
+      featureGateAllow: featureGate.allow,
+      patternWeightAllow: patternWeight.allow,
+      hasPatternHardGate,
+      reason: patternWeight.reasons.join(" / "),
+      details: { applied: patternWeight.applied, robustHardGatePolicy },
+    });
+
+    return {
+      ok: true,
+      stage: "engine_skipped_by_pattern_weight",
+      demo100: demo100Before,
+      coldStartDemoMode,
+      verificationMode,
+      aiVersion: CURRENT_AI_VERSION,
+      learning,
+      similarity,
+      confidence,
+      entryGate: gate,
+      empiricalEntryGate: empiricalGate,
+      featureWinRateGate: featureGate,
+      patternWeight,
+      robustHardGatePolicy,
+      featureSnapshot: featureGateInputSnapshot,
+      finalScore: patternWeight.adjustedScore,
+      message: `Pattern Weight: ${patternWeight.reasons.join(" / ")}`,
+    };
+  }
+
+  const finalScore = robustDemo2Mode.enabled
+    ? Math.max(
+        patternWeight.adjustedScore,
+        input.demoPart2RobustCandidate?.directionalScore ?? 40,
+      )
+    : patternWeight.adjustedScore;
+
+  const snapshot = buildFeatureSnapshot({
+    pair: input.pair,
+    direction: effectiveDirection,
+    score: input.score,
+    weightScore: learning.adjustedScore,
+    similarityScore: similarity.adjustedScore,
+    finalScore,
+    features: {
+      ...(input.features ?? {}),
+      aiScore: input.score,
+      weightScore: learning.adjustedScore,
+      similarityScore: similarity.adjustedScore,
+      empiricalScore,
+      finalScore,
+      entryGate: gate.allow,
+      entryGateScore: gate.score,
+      entryGateReasons: gate.reasons,
+      empiricalEntryGate: empiricalGate.allow,
+      empiricalEntryGateScore: empiricalGate.score,
+      empiricalEntryGateBand: empiricalGate.scoreBand,
+      empiricalEntryGateWinRate: empiricalGate.winRate,
+      empiricalEntryGateSampleSize: empiricalGate.sampleSize,
+      empiricalEntryGateAdjustment: empiricalGate.adjustment,
+      empiricalEntryGateReasons: empiricalGate.reasons,
+      featureWinRateGate: featureGate.allow,
+      featureWinRateGateOriginalScore: featureGate.originalScore,
+      featureWinRateGateAdjustedScore: featureGate.adjustedScore,
+      featureWinRateGateTotalAdjustment: featureGate.totalAdjustment,
+      featureWinRateGateApplied: featureGate.applied,
+      featureWinRateGateReasons: featureGate.reasons,
+      patternWeightGate: patternWeight.allow,
+      patternWeightOriginalScore: patternWeight.originalScore,
+      patternWeightAdjustedScore: patternWeight.adjustedScore,
+      patternWeightTotalAdjustment: patternWeight.totalAdjustment,
+      patternWeightApplied: patternWeight.applied,
+      patternWeightSignals: patternWeight.signals,
+      patternWeightReasons: patternWeight.reasons,
+      robustHardGatePolicy,
+      aiVersion: CURRENT_AI_VERSION,
+      coldStartDemoMode: coldStartDemoMode.enabled,
+      verificationMode: verificationMode.enabled,
+      robustDemo2Mode: robustDemo2Mode.enabled,
+      robustDemo2Candidate: robustDemo2Mode.candidate,
+      robustPipeline,
+      effectiveMinConfidence,
+      source: "trading_engine_phase15_l_ai_version_save",
+    },
+  });
+
   const demoTrade = await executeDemoTrade({
     accountId: input.accountId,
     pair: input.pair,
-    direction: input.direction,
+    direction: effectiveDirection,
     score: finalScore,
     amount: input.amount ?? 1,
     duration,
     durationUnit,
     currency: input.currency ?? "USD",
-    minScore: coldStartDemoMode.enabled ? 35 : input.minScore ?? 80,
+    minScore: robustDemo2Mode.enabled
+      ? 40
+      : coldStartDemoMode.enabled
+        ? 35
+        : input.minScore ?? 80,
     minPayoutRate: input.minPayoutRate ?? 1.8,
   });
 
   if (demoTrade.stage !== "demo_trade_executed") {
+    recordEntryFunnelEvent({
+      stage: "engine_skipped_by_final_decision",
+      aiVersion: CURRENT_AI_VERSION,
+      pair: input.pair,
+      direction: effectiveDirection,
+      inputScore: input.score,
+      finalScore,
+      confidence: confidence.confidence,
+      featureGateAllow: featureGate.allow,
+      patternWeightAllow: patternWeight.allow,
+      reason: demoTrade?.finalDecision?.reasons?.join(" / ") ?? "Final Decision がSKIP",
+      details: { demoTrade },
+    });
+
     return {
       ok: true,
       stage: "engine_skipped",
       demo100: demo100Before,
       coldStartDemoMode,
       verificationMode,
+      robustDemo2Mode,
       learning,
       similarity,
       confidence,
       entryGate: gate,
       empiricalEntryGate: empiricalGate,
+      featureWinRateGate: featureGate,
+      patternWeight,
+      featureSnapshot: snapshot,
       finalScore,
       demoTrade,
       message: "Final Decision が SKIP のため監視・保存しませんでした",
@@ -315,17 +627,32 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
   const contractId = demoTrade.buy?.contractId;
 
   if (!contractId) {
+    recordEntryFunnelEvent({
+      stage: "engine_error",
+      aiVersion: CURRENT_AI_VERSION,
+      pair: input.pair,
+      direction: effectiveDirection,
+      inputScore: input.score,
+      finalScore,
+      confidence: confidence.confidence,
+      reason: "contractId が取得できませんでした",
+    });
+
     return {
       ok: false,
       stage: "engine_error",
       demo100: demo100Before,
       coldStartDemoMode,
       verificationMode,
+      robustDemo2Mode,
       learning,
       similarity,
       confidence,
       entryGate: gate,
       empiricalEntryGate: empiricalGate,
+      featureWinRateGate: featureGate,
+      patternWeight,
+      featureSnapshot: snapshot,
       finalScore,
       demoTrade,
       error: "contractId が取得できませんでした",
@@ -350,7 +677,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       contractId: monitor.contractId,
       proposalId: demoTrade.proposal?.proposalId ?? null,
       pair: input.pair,
-      direction: input.direction,
+      direction: effectiveDirection,
       score: finalScore,
       payoutRate: demoTrade.proposal?.payoutRate ?? null,
       buyPrice: monitor.buyPrice,
@@ -361,43 +688,62 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       exitSpot: monitor.exitSpot,
       startTime: monitor.startTime,
       endTime: monitor.endTime,
-      features: {
-        ...(input.features ?? {}),
-        aiScore: input.score,
-        weightScore: learning.adjustedScore,
-        similarityScore: similarity.adjustedScore,
-        finalScore,
-        entryGate: gate.allow,
-        entryGateScore: gate.score,
-        entryGateReasons: gate.reasons,
-        empiricalEntryGate: empiricalGate.allow,
-        empiricalEntryGateScore: empiricalGate.score,
-        empiricalEntryGateBand: empiricalGate.scoreBand,
-        empiricalEntryGateWinRate: empiricalGate.winRate,
-        empiricalEntryGateSampleSize: empiricalGate.sampleSize,
-        empiricalEntryGateAdjustment: empiricalGate.adjustment,
-        empiricalEntryGateReasons: empiricalGate.reasons,
-        coldStartDemoMode: coldStartDemoMode.enabled,
-        verificationMode: verificationMode.enabled,
-        effectiveMinConfidence,
-      },
+      features: snapshot,
+      aiVersion: CURRENT_AI_VERSION,
     });
 
     demo100Notify = await notifyDemo100CompletedIfNeeded();
     demo100After = getDemo100Status();
   }
 
-  await sendLinePushMessage({
-    text: createTradeResultLineText({
-      pair: input.pair,
-      direction: input.direction,
-      status: monitor.status,
-      buyPrice: monitor.buyPrice,
-      profit: monitor.profit,
-      finalScore,
-      confidence: confidence.confidence,
-      entryGate: gate,
-    }),
+  const fallbackBuyPrice =
+    monitor.buyPrice ??
+    demoTrade.buy?.buy?.buy_price ??
+    (demoTrade.buy as any)?.buyPrice ??
+    input.amount ??
+    null;
+
+  if (monitor.ok && monitor.stage === "contract_closed") {
+    await sendLinePushMessage({
+      text: createTradeResultLineText({
+        pair: input.pair,
+        direction: effectiveDirection,
+        status: monitor.status,
+        buyPrice: fallbackBuyPrice,
+        profit: monitor.profit,
+        finalScore,
+        confidence: confidence.confidence,
+        entryGate: gate,
+      }),
+    });
+  } else {
+    await sendLinePushMessage({
+      text:
+        "⚠️ Binary Analysis AI 監視未完了\n" +
+        `通貨ペア: ${input.pair}\n` +
+        `方向: ${input.direction}\n` +
+        `掛け金: ${fallbackBuyPrice ?? "不明"}\n` +
+        `Score: ${finalScore}\n` +
+        `Confidence: ${confidence.confidence}%\n` +
+        `Stage: ${monitor.stage}\n` +
+        `Status: ${monitor.status ?? "UNKNOWN"}\n` +
+        `理由: ${(monitor as any).error ?? "Contract Monitor timeout"}\n` +
+        "Demo Buy は成功していますが、勝敗確定の取得が完了していません。通常の勝敗通知・SQLite保存はスキップしました。",
+    });
+  }
+
+  recordEntryFunnelEvent({
+    stage: monitor.ok ? "engine_completed" : "engine_monitor_failed",
+    aiVersion: CURRENT_AI_VERSION,
+    pair: input.pair,
+    direction: effectiveDirection,
+    inputScore: input.score,
+    finalScore,
+    confidence: confidence.confidence,
+    featureGateAllow: featureGate.allow,
+    patternWeightAllow: patternWeight.allow,
+    reason: monitor.ok ? "Contract監視とSQLite保存が完了" : (monitor as any).error ?? "Contract監視未完了",
+    details: { monitorStage: monitor.stage, status: monitor.status, profit: monitor.profit },
   });
 
   return {
@@ -406,11 +752,17 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     demo100: demo100After,
     coldStartDemoMode,
     verificationMode,
+    robustDemo2Mode,
+    robustPipeline,
     learning,
     similarity,
     confidence,
     entryGate: gate,
     empiricalEntryGate: empiricalGate,
+    featureWinRateGate: featureGate,
+    patternWeight,
+    robustHardGatePolicy,
+    featureSnapshot: snapshot,
     finalScore,
     demoTrade,
     monitor,
@@ -422,8 +774,9 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       maxWaitMs,
       intervalMs: 5_000,
     },
+    aiVersion: CURRENT_AI_VERSION,
     message: monitor.ok
-      ? "Weight → Similarity → Confidence → Entry Gate → Empirical Entry Gate → Demo Buy → Contract監視 → SQLite保存 → Demo100確認 完了"
+      ? "Weight → Similarity → Confidence → Entry Gate → Empirical Entry Gate → Feature WinRate Gate → Pattern Weight → Feature Snapshot → Demo Buy → Contract監視 → SQLite保存 → AI Version保存 → Demo Part2確認 完了"
       : "Demo Buy は成功しましたが Contract監視が完了しませんでした",
   };
 }
