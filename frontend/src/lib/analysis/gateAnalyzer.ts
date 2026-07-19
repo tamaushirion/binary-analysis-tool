@@ -26,6 +26,8 @@ type NearMissSummaryRow = {
   rejectStage: string;
   metric: string;
   totalNearMisses: number;
+  avgObservedValue: number | null;
+  avgThresholdValue: number | null;
   avgGap: number | null;
   minGap: number | null;
   maxGap: number | null;
@@ -111,6 +113,8 @@ export function analyzeGates(input?: { sinceDays?: number | null }) {
             reject_stage AS rejectStage,
             metric,
             COUNT(*) AS totalNearMisses,
+            AVG(observed_value) AS avgObservedValue,
+            AVG(threshold_value) AS avgThresholdValue,
             AVG(gap) AS avgGap,
             MIN(gap) AS minGap,
             MAX(gap) AS maxGap
@@ -168,6 +172,8 @@ export function analyzeGates(input?: { sinceDays?: number | null }) {
     rejectStage: row.rejectStage,
     metric: row.metric,
     totalNearMisses: Number(row.totalNearMisses),
+    avgObservedValue: round2(row.avgObservedValue),
+    avgThresholdValue: round2(row.avgThresholdValue),
     avgGap: round2(row.avgGap),
     minGap: round2(row.minGap),
     maxGap: round2(row.maxGap),
