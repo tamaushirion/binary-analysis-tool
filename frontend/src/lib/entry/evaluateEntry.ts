@@ -1,5 +1,6 @@
 import { buildFeatureSnapshot } from "@/lib/analysis/featureSnapshotBuilder";
 import type { TradeFeatureSnapshot } from "@/lib/db/tradeRepository";
+import { createGateEvaluationId, recordGateLog } from "@/lib/entry/gateLogger";
 import { calculateConfidence } from "@/lib/learning/confidenceEngine";
 import type { Demo2RobustCandidateMatch } from "@/lib/learning/demo2RobustCandidateGate";
 import { applyEmpiricalEntryGate } from "@/lib/learning/empiricalEntryGate";
@@ -24,6 +25,7 @@ export type EntryEvaluationInput = {
   coldStartEnabled: boolean;
   verificationEnabled: boolean;
   robustCandidate: Demo2RobustCandidateMatch | null;
+  aiVersion?: string | null;
 };
 
 export type EntryRejectStage =
@@ -129,6 +131,7 @@ function bypassEntryGateForVerification(params: {
 }
 
 export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResult {
+  const evaluationId = createGateEvaluationId();
   const robustEnabled = input.robustCandidate?.enabled === true;
   const confidence = calculateConfidence({
     baseScore: input.score,
@@ -137,6 +140,25 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     minConfidence: input.minConfidence,
   });
   const similarityFinalScore = input.similarity.adjustedScore;
+  const logGate = (params: Omit<Parameters<typeof recordGateLog>[0],
+    "evaluationId" | "aiVersion" | "pair" | "direction" | "inputScore"
+  >) => recordGateLog({
+    ...params,
+    evaluationId,
+    aiVersion: input.aiVersion,
+    pair: input.pair,
+    direction: input.direction,
+    inputScore: input.score,
+  });
+
+  logGate({
+    gateName: "confidence",
+    allow: confidence.trade,
+    score: confidence.confidence,
+    adjustedScore: similarityFinalScore,
+    reasons: confidence.reasons,
+    details: confidence,
+  });
 
   if (
     !confidence.trade &&
@@ -173,6 +195,14 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     verificationEnabled: input.verificationEnabled,
     gate: coldStartEntryGate,
   });
+  logGate({
+    gateName: "entry_gate",
+    allow: entryGate.allow,
+    score: entryGate.score,
+    adjustedScore: similarityFinalScore,
+    reasons: entryGate.reasons,
+    details: { rawEntryGate, entryGate },
+  });
 
   if (
     !entryGate.allow &&
@@ -200,6 +230,14 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     minWinRate: 57,
   });
   const empiricalScore = empiricalEntryGate.adjustedScore;
+  logGate({
+    gateName: "empirical_entry_gate",
+    allow: empiricalEntryGate.allow,
+    score: empiricalEntryGate.score,
+    adjustedScore: empiricalScore,
+    reasons: empiricalEntryGate.reasons,
+    details: empiricalEntryGate,
+  });
 
   if (!empiricalEntryGate.allow && !input.coldStartEnabled && !robustEnabled) {
     return {
@@ -247,6 +285,22 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     featureApplied: featureWinRateGate.applied,
     patternApplied: [],
   });
+  logGate({
+    gateName: "feature_win_rate_gate",
+    allow: featureWinRateGate.allow,
+    score: featureWinRateGate.originalScore,
+    adjustedScore: featureWinRateGate.adjustedScore,
+    reasons: featureWinRateGate.reasons,
+    details: featureWinRateGate,
+  });
+  logGate({
+    gateName: "feature_robust_hard_gate_policy",
+    allow:
+      !hasFeatureHardGate || featureHardGatePolicy.canOverrideFeatureHardGate,
+    adjustedScore: featureWinRateGate.adjustedScore,
+    reasons: featureHardGatePolicy.reasons,
+    details: featureHardGatePolicy,
+  });
 
   if (
     !featureWinRateGate.allow &&
@@ -288,6 +342,21 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     candidate: input.robustCandidate,
     featureApplied: featureWinRateGate.applied,
     patternApplied: patternWeight.applied,
+  });
+  logGate({
+    gateName: "pattern_weight",
+    allow: patternWeight.allow,
+    score: patternWeight.originalScore,
+    adjustedScore: patternWeight.adjustedScore,
+    reasons: patternWeight.reasons,
+    details: patternWeight,
+  });
+  logGate({
+    gateName: "robust_hard_gate_policy",
+    allow: !hasPatternHardGate,
+    adjustedScore: patternWeight.adjustedScore,
+    reasons: robustHardGatePolicy.reasons,
+    details: robustHardGatePolicy,
   });
 
   if (

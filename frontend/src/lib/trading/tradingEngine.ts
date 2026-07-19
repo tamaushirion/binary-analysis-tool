@@ -167,6 +167,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     coldStartEnabled: coldStartDemoMode.enabled,
     verificationEnabled: verificationMode.enabled,
     robustCandidate: robustDemo2Mode.candidate,
+    aiVersion: CURRENT_AI_VERSION,
   });
 
   if (!entry.allow) {
@@ -221,7 +222,6 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     featureWinRateGate: featureGate,
     patternWeight,
     robustHardGatePolicy,
-    featureSnapshot: featureGateInputSnapshot,
     finalScore,
   } = entry;
   const empiricalScore = empiricalGate.adjustedScore;
