@@ -9,6 +9,12 @@ import { runMarketObservationPhase16PForwardValidation } from "@/lib/learning/ma
 import { runMarketObservationPhase16QForwardValidation } from "@/lib/learning/marketObservationPhase16QForwardValidation";
 import { evaluateDemo2RobustCandidate } from "@/lib/learning/demo2RobustCandidateGate";
 import { getDemo2RobustCandidateTradeStats } from "@/lib/learning/demo2RobustCandidateTradeStats";
+import { runDemo2RobustCandidatePreview } from "@/lib/learning/demo2RobustCandidatePreview";
+import { optimizeEntry } from "@/lib/analysis/entryOptimizer";
+import {
+  getDemo2LoggingReadiness,
+  recordDemo2Restart,
+} from "@/lib/demo2RestartStore";
 
 type AutoRunnerStatus = {
   running: boolean;
@@ -580,5 +586,109 @@ export function getServerAutoRunnerStatus() {
     inFlight: store.inFlight,
     demo100: getDemo100Status(),
     demoPart2: getDemoPart2Status(),
+  };
+}
+
+export function getDemo2RestartReadiness() {
+  const demo100 = getDemo100Status();
+  const demoPart2 = getDemoPart2Status();
+  const robustPreview = runDemo2RobustCandidatePreview();
+  const logging = getDemo2LoggingReadiness();
+  const optimizer = optimizeEntry({ sinceDays: 30 });
+  const blockers: string[] = [];
+
+  if (!demo100.completed) {
+    blockers.push("Demo100が完了していません");
+  }
+  if (demoPart2.completed) {
+    blockers.push("Demo Part2の目標300件が完了済みです");
+  }
+  if (robustPreview.failedCases > 0) {
+    blockers.push(
+      `Robust候補テストに${robustPreview.failedCases}件の失敗があります`,
+    );
+  }
+  if (!logging.ready) {
+    blockers.push(`ログテーブル不足: ${logging.missing.join(", ")}`);
+  }
+  if (store.inFlight) {
+    blockers.push("Auto Runnerが処理中です");
+  }
+
+  return {
+    ok: true as const,
+    stage: "demo2_restart_readiness" as const,
+    ready: blockers.length === 0,
+    blockers,
+    preservesExistingTrades: true as const,
+    executesDemoBuy: false as const,
+    currentRunner: getServerAutoRunnerStatus(),
+    checks: {
+      demo100,
+      demoPart2,
+      robustPreview: {
+        passedCases: robustPreview.passedCases,
+        failedCases: robustPreview.failedCases,
+      },
+      logging,
+      optimizer: {
+        readiness: optimizer.readiness,
+        applyAutomatically: optimizer.applyAutomatically,
+        shadowValidationCandidates: optimizer.shadowValidationCandidates.length,
+      },
+    },
+  };
+}
+
+export function restartDemo2AutoRunner(
+  intervalMs = DEFAULT_INTERVAL_MS,
+  reason = "phase16_demo2_restart",
+) {
+  const safeIntervalMs = Math.max(intervalMs, DEFAULT_INTERVAL_MS);
+  const readiness = getDemo2RestartReadiness();
+
+  if (!readiness.ready) {
+    return {
+      ok: true as const,
+      stage: "demo2_restart_blocked" as const,
+      restarted: false as const,
+      readiness,
+    };
+  }
+
+  const previousStatus = getServerAutoRunnerStatus();
+  if (store.status.running) {
+    stopServerAutoRunner("demo2_restart");
+  }
+
+  const restartLog = recordDemo2Restart({
+    aiVersion: readiness.checks.demoPart2.aiVersion,
+    intervalMs: safeIntervalMs,
+    previousTradeCount: readiness.checks.demoPart2.currentCount,
+    restartReason: reason,
+  });
+  if (!restartLog.ok) {
+    return {
+      ok: false as const,
+      stage: "demo2_restart_log_error" as const,
+      restarted: false as const,
+      preservesExistingTrades: true as const,
+      previousStatus,
+      readiness,
+      restartLog,
+    };
+  }
+
+  const startResult = startServerAutoRunner(safeIntervalMs);
+
+  return {
+    ok: true as const,
+    stage: "demo2_restarted" as const,
+    restarted: true as const,
+    preservesExistingTrades: true as const,
+    previousStatus,
+    readiness,
+    restartLog,
+    startResult,
   };
 }
