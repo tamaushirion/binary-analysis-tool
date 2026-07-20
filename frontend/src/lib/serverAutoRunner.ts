@@ -15,6 +15,10 @@ import {
   getDemo2LoggingReadiness,
   recordDemo2Restart,
 } from "@/lib/demo2RestartStore";
+import {
+  getRejectShadowSummary,
+  settleRejectShadows,
+} from "@/lib/entry/rejectShadowTracker";
 
 type AutoRunnerStatus = {
   running: boolean;
@@ -363,6 +367,7 @@ async function runOnce() {
     const observedAt = Date.now();
     currentStep = "market_observation";
     const marketObservation = runMarketObservation(providerResult as ProviderLikeResult);
+    const rejectShadowSettlement = settleRejectShadows({ now: observedAt });
     currentStep = "phase16_n";
     const marketObservationForwardValidation = runMarketObservationForwardValidationSummary();
     currentStep = "phase16_p";
@@ -406,6 +411,14 @@ async function runOnce() {
     const normalizedProvider = providerResult as ProviderLikeResult;
     const baseFeatures = normalizedProvider.features ?? {};
     const debug = normalizedProvider.debug ?? {};
+    const candles = Array.isArray(normalizedProvider.candles)
+      ? normalizedProvider.candles
+      : [];
+    const latestCandle = candles.length > 0 ? candles[candles.length - 1] : null;
+    const shadowObservationEpoch =
+      numberOrNull(debug.latestEpoch) ?? numberOrNull(latestCandle?.time);
+    const shadowEntrySpot =
+      numberOrNull(debug.latestClose) ?? numberOrNull(latestCandle?.close);
     const robustMatch = robustCandidateDecision.allow
       ? robustCandidateDecision.match
       : null;
@@ -451,6 +464,10 @@ async function runOnce() {
         backtestWinRate3m:
           numberOrNull(baseFeatures.backtestWinRate3m) ??
           numberOrNull(debug.backtest3mWinRate),
+        shadowObservationEpoch,
+        shadowExitEpoch:
+          shadowObservationEpoch === null ? null : shadowObservationEpoch + 60,
+        shadowEntrySpot,
         demo2RobustCandidate: robustMatch,
       },
       reasons: [
@@ -465,6 +482,7 @@ async function runOnce() {
       message: "Feature条件合格。Trading Engineへ送信します。",
       providerDebug: signal.debug,
       marketObservation,
+      rejectShadowSettlement,
       marketObservationForwardValidation,
       phase16PForwardValidation,
       phase16QForwardValidation,
@@ -502,6 +520,7 @@ async function runOnce() {
       ...result,
       autoRunnerProviderDebug: signal.debug,
       marketObservation,
+      rejectShadowSettlement,
       marketObservationForwardValidation,
       phase16PForwardValidation,
       phase16QForwardValidation,
@@ -586,6 +605,7 @@ export function getServerAutoRunnerStatus() {
     inFlight: store.inFlight,
     demo100: getDemo100Status(),
     demoPart2: getDemoPart2Status(),
+    rejectShadow: getRejectShadowSummary({ sinceDays: 30 }),
   };
 }
 

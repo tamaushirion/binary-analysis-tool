@@ -38,6 +38,7 @@ export type SyntheticFeatureDebug = {
   lowScore: number | null;
   selectedScore: number | null;
   selectedDirection: "HIGH" | "LOW" | null;
+  latestEpoch: number | null;
   latestClose: number | null;
   ema9: number | null;
   ema21: number | null;
@@ -123,6 +124,7 @@ function emptyDebug(asset: SyntheticAsset): SyntheticFeatureDebug {
     lowScore: null,
     selectedScore: null,
     selectedDirection: null,
+    latestEpoch: null,
     latestClose: null,
     ema9: null,
     ema21: null,
@@ -440,6 +442,7 @@ function buildSignal(asset: SyntheticAsset, candles: Candle[], attempts: number,
     lowScore: scored.lowScore,
     selectedScore: scored.score,
     selectedDirection: scored.direction,
+    latestEpoch: scored.latest.time,
     latestClose: scored.latest.close,
     ema9: scored.ema9,
     ema21: scored.ema21,

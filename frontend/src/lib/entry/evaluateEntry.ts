@@ -3,6 +3,7 @@ import type { TradeFeatureSnapshot } from "@/lib/db/tradeRepository";
 import { createGateEvaluationId, recordGateLog } from "@/lib/entry/gateLogger";
 import { recordNearMiss } from "@/lib/entry/nearMissLogger";
 import { recordRejectLog, type RejectStage } from "@/lib/entry/rejectLogger";
+import { recordRejectShadowCandidate } from "@/lib/entry/rejectShadowTracker";
 import { calculateConfidence } from "@/lib/learning/confidenceEngine";
 import type { Demo2RobustCandidateMatch } from "@/lib/learning/demo2RobustCandidateGate";
 import { applyEmpiricalEntryGate } from "@/lib/learning/empiricalEntryGate";
@@ -154,15 +155,46 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     | "direction"
     | "inputScore"
     | "confidence"
-  >) => recordRejectLog({
-    ...params,
-    evaluationId,
-    aiVersion: input.aiVersion,
-    pair: input.pair,
-    direction: input.direction,
-    inputScore: input.score,
-    confidence: confidence.confidence,
-  });
+  >) => {
+    const result = recordRejectLog({
+      ...params,
+      evaluationId,
+      aiVersion: input.aiVersion,
+      pair: input.pair,
+      direction: input.direction,
+      inputScore: input.score,
+      confidence: confidence.confidence,
+    });
+    const observationEpoch = Number(input.features?.shadowObservationEpoch);
+    const exitEpoch = Number(input.features?.shadowExitEpoch);
+    const entrySpot = Number(input.features?.shadowEntrySpot);
+
+    if (
+      result.ok &&
+      Number.isInteger(observationEpoch) &&
+      Number.isInteger(exitEpoch) &&
+      exitEpoch > observationEpoch &&
+      Number.isFinite(entrySpot)
+    ) {
+      recordRejectShadowCandidate({
+        rejectLogId: result.rejectLogId,
+        evaluationId,
+        rejectStage: params.rejectStage,
+        aiVersion: input.aiVersion,
+        pair: input.pair,
+        direction: input.direction,
+        inputScore: input.score,
+        finalScore: params.finalScore,
+        confidence: confidence.confidence,
+        observationEpoch,
+        exitEpoch,
+        entrySpot,
+        featureSnapshot: params.featureSnapshot,
+      });
+    }
+
+    return result;
+  };
   const logNearMiss = (params: Omit<Parameters<typeof recordNearMiss>[0],
     | "evaluationId"
     | "aiVersion"

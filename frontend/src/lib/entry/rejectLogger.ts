@@ -107,7 +107,23 @@ export function recordRejectLog(input: RejectLogInput) {
       createdAt: Date.now(),
     });
 
-    return { ok: true as const };
+    const row = db
+      .prepare(
+        `SELECT id
+         FROM entry_reject_logs
+         WHERE evaluation_id = ?
+         LIMIT 1`,
+      )
+      .get(input.evaluationId) as { id: number } | undefined;
+
+    if (!row) {
+      return {
+        ok: false as const,
+        error: "Reject Log記録後のID取得に失敗しました",
+      };
+    }
+
+    return { ok: true as const, rejectLogId: row.id };
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Reject Log記録失敗";
     console.error("Reject Log記録失敗", message);
