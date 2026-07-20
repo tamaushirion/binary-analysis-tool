@@ -108,6 +108,33 @@ type ServerAutoRunnerStatus = {
   mode?: string;
   demo100?: Demo100Status;
   demoPart2?: DemoPart2Status;
+  rejectShadow?: RejectShadowSummary;
+};
+
+type RejectShadowStage = {
+  rejectStage: string;
+  total: number;
+  pending: number;
+  settled: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  expired: number;
+  totalProfit: number;
+  latestSettledAt: number | null;
+  winRate: number | null;
+};
+
+type RejectShadowSummary = {
+  trackingOnly: boolean;
+  executesDemoBuy: boolean;
+  changesEntryDecision: boolean;
+  settlementDurationMinutes: number;
+  total: number;
+  pending: number;
+  settled: number;
+  stages: RejectShadowStage[];
+  message: string;
 };
 
 type BreakdownItem = {
@@ -334,6 +361,7 @@ export default function Demo100DashboardPage() {
       : 0;
 
   const lastResult = runner?.lastResult ?? null;
+  const rejectShadow = runner?.rejectShadow ?? null;
   const robustDecision: RobustCandidateDecision | null =
     lastResult?.robustCandidateDecision ?? null;
   const robustMode = lastResult?.robustDemo2Mode ?? null;
@@ -431,7 +459,7 @@ export default function Demo100DashboardPage() {
           </div>
 
           <div className="mt-4 grid gap-4 md:grid-cols-4">
-            <Card title="評価候補数" value={`${robustDecision?.evaluatedCandidates ?? 4}`} />
+            <Card title="評価候補数" value={`${robustDecision?.evaluatedCandidates ?? 5}`} />
             <Card title="Robust Mode" value={robustMode?.enabled ? "ENABLED" : "DISABLED"} />
             <Card title="最終Stage" value={lastResult?.stage ?? "-"} />
             <Card title="使用方向" value={matchedCandidate?.direction ?? "-"} />
@@ -457,7 +485,7 @@ export default function Demo100DashboardPage() {
             </div>
           ) : (
             <div className="mt-4 rounded-xl border border-zinc-700 bg-zinc-900 p-4">
-              <p className="font-bold">現在は4候補の条件外です。</p>
+              <p className="font-bold">現在は5候補の条件外です。</p>
               <p className="mt-2 text-sm text-zinc-400">
                 {robustDecision?.message ?? "Auto Runnerの次回実行を待っています。"}
               </p>
@@ -559,6 +587,64 @@ export default function Demo100DashboardPage() {
             </div>
           </section>
         )}
+
+        <section className="mb-6 rounded-xl border border-amber-700 bg-amber-950/30 p-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-sm text-amber-300">Rejected Entry Shadow Tracker</p>
+              <h2 className="text-xl font-bold">Gateで見送った候補の仮想成績</h2>
+              <p className="mt-2 text-sm text-zinc-300">
+                実取引せず、同じ1分条件の結果だけを記録します。AI判定にはまだ反映しません。
+              </p>
+            </div>
+            <StatusBadge label="検証専用" active />
+          </div>
+
+          <div className="mt-4 grid gap-4 md:grid-cols-4">
+            <Card title="記録候補" value={`${rejectShadow?.total ?? 0}件`} />
+            <Card title="結果確定" value={`${rejectShadow?.settled ?? 0}件`} />
+            <Card title="判定待ち" value={`${rejectShadow?.pending ?? 0}件`} />
+            <Card
+              title="実取引への影響"
+              value={rejectShadow?.changesEntryDecision ? "あり" : "なし"}
+            />
+          </div>
+
+          {(rejectShadow?.stages.length ?? 0) > 0 ? (
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full min-w-[760px] text-left text-sm">
+                <thead className="text-amber-200">
+                  <tr className="border-b border-amber-800">
+                    <th className="py-2">拒否Gate</th>
+                    <th className="py-2">確定件数</th>
+                    <th className="py-2">勝敗</th>
+                    <th className="py-2">勝率</th>
+                    <th className="py-2">仮想損益</th>
+                    <th className="py-2">判定待ち</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rejectShadow?.stages.map((item) => (
+                    <tr key={item.rejectStage} className="border-b border-amber-950">
+                      <td className="py-3 font-bold">{item.rejectStage}</td>
+                      <td className="py-3">{item.settled}件</td>
+                      <td className="py-3">
+                        {item.wins}勝 {item.losses}敗 {item.draws}分
+                      </td>
+                      <td className="py-3">{formatPercent(item.winRate)}</td>
+                      <td className="py-3">{formatProfit(item.totalProfit)}</td>
+                      <td className="py-3">{item.pending}件</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="mt-4 rounded-lg bg-zinc-950 p-4 text-sm text-zinc-400">
+              新機能の開始後に拒否候補が発生すると、ここへ成績が表示されます。
+            </p>
+          )}
+        </section>
 
         <ForwardSection title="Phase16-P 前向き検証" payload={phase16P} />
         <ForwardSection title="Phase16-Q 前向き検証" payload={phase16Q} />
