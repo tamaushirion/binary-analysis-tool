@@ -109,6 +109,7 @@ type ServerAutoRunnerStatus = {
   demo100?: Demo100Status;
   demoPart2?: DemoPart2Status;
   rejectShadow?: RejectShadowSummary;
+  rejectShadowAnalysis?: RejectShadowAnalysis;
 };
 
 type RejectShadowStage = {
@@ -134,6 +135,35 @@ type RejectShadowSummary = {
   pending: number;
   settled: number;
   stages: RejectShadowStage[];
+  message: string;
+};
+
+type RejectShadowCandidate = {
+  rejectStage: string;
+  dimension: string;
+  label: string;
+  settled: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  totalProfit: number;
+  winRate: number | null;
+  wilsonLowerBound: number | null;
+  classification:
+    | "COLLECTING"
+    | "HOLD"
+    | "WATCH"
+    | "REVIEW_CANDIDATE"
+    | "REJECT_CONTINUE";
+  remainingToWatch: number;
+  remainingToReview: number;
+};
+
+type RejectShadowAnalysis = {
+  appliesAutomatically: boolean;
+  settledShadows: number;
+  reviewCandidates: number;
+  candidates: RejectShadowCandidate[];
   message: string;
 };
 
@@ -362,6 +392,7 @@ export default function Demo100DashboardPage() {
 
   const lastResult = runner?.lastResult ?? null;
   const rejectShadow = runner?.rejectShadow ?? null;
+  const rejectShadowAnalysis = runner?.rejectShadowAnalysis ?? null;
   const robustDecision: RobustCandidateDecision | null =
     lastResult?.robustCandidateDecision ?? null;
   const robustMode = lastResult?.robustDemo2Mode ?? null;
@@ -644,6 +675,66 @@ export default function Demo100DashboardPage() {
               新機能の開始後に拒否候補が発生すると、ここへ成績が表示されます。
             </p>
           )}
+
+          <div className="mt-6 border-t border-amber-900 pt-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-bold">条件別Shadow Analyzer</h3>
+                <p className="mt-1 text-sm text-zinc-400">
+                  Score帯・方向・RCI・時間・曜日・セッション別に取り逃しを探します。
+                </p>
+              </div>
+              <div className="rounded-full bg-zinc-800 px-3 py-1 text-sm">
+                通過検討候補 {rejectShadowAnalysis?.reviewCandidates ?? 0}件
+              </div>
+            </div>
+
+            {(rejectShadowAnalysis?.candidates.length ?? 0) > 0 ? (
+              <div className="mt-4 overflow-x-auto">
+                <table className="w-full min-w-[980px] text-left text-sm">
+                  <thead className="text-amber-200">
+                    <tr className="border-b border-amber-800">
+                      <th className="py-2">拒否Gate</th>
+                      <th className="py-2">条件</th>
+                      <th className="py-2">件数</th>
+                      <th className="py-2">勝率</th>
+                      <th className="py-2">仮想損益</th>
+                      <th className="py-2">信頼下限</th>
+                      <th className="py-2">判定</th>
+                      <th className="py-2">30件まで</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rejectShadowAnalysis?.candidates.slice(0, 20).map((item) => (
+                      <tr
+                        key={`${item.rejectStage}-${item.dimension}-${item.label}`}
+                        className="border-b border-amber-950"
+                      >
+                        <td className="max-w-[260px] py-3 text-xs">
+                          {item.rejectStage}
+                        </td>
+                        <td className="py-3 font-bold">
+                          {item.dimension}: {item.label}
+                        </td>
+                        <td className="py-3">{item.settled}件</td>
+                        <td className="py-3">{formatPercent(item.winRate)}</td>
+                        <td className="py-3">{formatProfit(item.totalProfit)}</td>
+                        <td className="py-3">
+                          {formatPercent(item.wilsonLowerBound)}
+                        </td>
+                        <td className="py-3">{item.classification}</td>
+                        <td className="py-3">{item.remainingToWatch}件</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="mt-4 text-sm text-zinc-400">
+                Shadow結果が確定すると条件別分析を開始します。
+              </p>
+            )}
+          </div>
         </section>
 
         <ForwardSection title="Phase16-P 前向き検証" payload={phase16P} />
