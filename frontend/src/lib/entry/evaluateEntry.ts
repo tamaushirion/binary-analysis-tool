@@ -4,6 +4,12 @@ import { createGateEvaluationId, recordGateLog } from "@/lib/entry/gateLogger";
 import { recordNearMiss } from "@/lib/entry/nearMissLogger";
 import { recordRejectLog, type RejectStage } from "@/lib/entry/rejectLogger";
 import { recordRejectShadowCandidate } from "@/lib/entry/rejectShadowTracker";
+import {
+  canContinueDemo2ShadowOverride,
+  evaluateDemo2ShadowGateOverride,
+  type Demo2ShadowOverrideMatch,
+} from "@/lib/entry/demo2ShadowGateOverride";
+import { recordDemo2ShadowOverrideMatch } from "@/lib/entry/demo2ShadowOverrideStore";
 import { calculateConfidence } from "@/lib/learning/confidenceEngine";
 import type { Demo2RobustCandidateMatch } from "@/lib/learning/demo2RobustCandidateGate";
 import { applyEmpiricalEntryGate } from "@/lib/learning/empiricalEntryGate";
@@ -55,6 +61,7 @@ type EntryEvaluationRejected = {
   featureSnapshot?: TradeFeatureSnapshot;
   hasFeatureHardGate?: boolean;
   hasPatternHardGate?: boolean;
+  shadowGateOverride?: ActiveShadowGateOverride | null;
 };
 
 type EntryEvaluationAllowed = {
@@ -69,6 +76,11 @@ type EntryEvaluationAllowed = {
   featureSnapshot: TradeFeatureSnapshot;
   hasFeatureHardGate: boolean;
   hasPatternHardGate: boolean;
+  shadowGateOverride: ActiveShadowGateOverride | null;
+};
+
+export type ActiveShadowGateOverride = Demo2ShadowOverrideMatch & {
+  overrideRunId: number;
 };
 
 export type EntryEvaluationResult =
@@ -138,6 +150,19 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     minConfidence: input.minConfidence,
   });
   const similarityFinalScore = input.similarity.adjustedScore;
+  const demo2Enabled = input.features?.autoRunnerMode === "demo_part2";
+  let shadowGateOverride: ActiveShadowGateOverride | null = null;
+  const activateShadowOverride = (match: Demo2ShadowOverrideMatch) => {
+    const recorded = recordDemo2ShadowOverrideMatch({
+      evaluationId,
+      match,
+      pair: input.pair,
+      direction: input.direction,
+      inputScore: input.score,
+    });
+    if (!recorded.ok) return null;
+    return { ...match, overrideRunId: recorded.overrideRunId };
+  };
   const logGate = (params: Omit<Parameters<typeof recordGateLog>[0],
     "evaluationId" | "aiVersion" | "pair" | "direction" | "inputScore"
   >) => recordGateLog({
@@ -327,6 +352,16 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     minWinRate: 57,
   });
   const empiricalScore = empiricalEntryGate.adjustedScore;
+  const empiricalShadowMatch = !empiricalEntryGate.allow
+    ? evaluateDemo2ShadowGateOverride({
+        demo2Enabled,
+        rejectedGate: "engine_skipped_by_empirical_entry_gate",
+        features: input.features,
+      })
+    : null;
+  if (empiricalShadowMatch) {
+    shadowGateOverride = activateShadowOverride(empiricalShadowMatch);
+  }
   logGate({
     gateName: "empirical_entry_gate",
     allow: empiricalEntryGate.allow,
@@ -336,7 +371,12 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     details: empiricalEntryGate,
   });
 
-  if (!empiricalEntryGate.allow && !input.coldStartEnabled && !robustEnabled) {
+  if (
+    !empiricalEntryGate.allow &&
+    !input.coldStartEnabled &&
+    !robustEnabled &&
+    !shadowGateOverride
+  ) {
     const reason = empiricalEntryGate.reasons.join(" / ");
     logReject({
       rejectStage: "engine_skipped_by_empirical_entry_gate",
@@ -406,6 +446,26 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     featureApplied: featureWinRateGate.applied,
     patternApplied: [],
   });
+  const featureShadowMatch =
+    !featureWinRateGate.allow && !shadowGateOverride
+      ? evaluateDemo2ShadowGateOverride({
+          demo2Enabled,
+          rejectedGate: "engine_skipped_by_feature_win_rate_gate",
+          features: featureSnapshot,
+          appliedGates: featureWinRateGate.applied,
+        })
+      : null;
+  if (featureShadowMatch) {
+    shadowGateOverride = activateShadowOverride(featureShadowMatch);
+  }
+  const shadowCanContinueFeature =
+    shadowGateOverride !== null &&
+    shadowGateOverride.rejectedGate ===
+      "engine_skipped_by_feature_win_rate_gate" &&
+    canContinueDemo2ShadowOverride({
+      match: shadowGateOverride,
+      appliedGates: featureWinRateGate.applied,
+    });
   logGate({
     gateName: "feature_win_rate_gate",
     allow: featureWinRateGate.allow,
@@ -426,6 +486,7 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
   if (
     !featureWinRateGate.allow &&
     !input.coldStartEnabled &&
+    !shadowCanContinueFeature &&
     !(
       robustEnabled &&
       (!hasFeatureHardGate || featureHardGatePolicy.canOverrideFeatureHardGate)
@@ -458,6 +519,7 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
       robustHardGatePolicy: featureHardGatePolicy,
       featureSnapshot,
       hasFeatureHardGate,
+      shadowGateOverride,
     };
   }
 
@@ -529,6 +591,7 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
       featureSnapshot,
       hasFeatureHardGate,
       hasPatternHardGate,
+      shadowGateOverride,
     };
   }
 
@@ -537,7 +600,9 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
         patternWeight.adjustedScore,
         input.robustCandidate?.directionalScore ?? 40,
       )
-    : patternWeight.adjustedScore;
+    : shadowGateOverride
+      ? Math.max(patternWeight.adjustedScore, 40)
+      : patternWeight.adjustedScore;
 
   return {
     allow: true as const,
@@ -551,5 +616,6 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     featureSnapshot,
     hasFeatureHardGate,
     hasPatternHardGate,
+    shadowGateOverride,
   };
 }
