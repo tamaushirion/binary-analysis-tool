@@ -20,6 +20,7 @@ import {
   settleRejectShadows,
 } from "@/lib/entry/rejectShadowTracker";
 import { analyzeRejectShadows } from "@/lib/analysis/rejectShadowAnalyzer";
+import { getDemo2ShadowOverrideSummary } from "@/lib/entry/demo2ShadowOverrideStore";
 
 type AutoRunnerStatus = {
   running: boolean;
@@ -608,6 +609,7 @@ export function getServerAutoRunnerStatus() {
     demoPart2: getDemoPart2Status(),
     rejectShadow: getRejectShadowSummary({ sinceDays: 30 }),
     rejectShadowAnalysis: analyzeRejectShadows({ sinceDays: 30 }),
+    shadowGateOverrides: getDemo2ShadowOverrideSummary(),
   };
 }
 

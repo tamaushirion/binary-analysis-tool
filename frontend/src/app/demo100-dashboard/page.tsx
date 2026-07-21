@@ -110,6 +110,7 @@ type ServerAutoRunnerStatus = {
   demoPart2?: DemoPart2Status;
   rejectShadow?: RejectShadowSummary;
   rejectShadowAnalysis?: RejectShadowAnalysis;
+  shadowGateOverrides?: ShadowGateOverrideSummary;
 };
 
 type RejectShadowStage = {
@@ -165,6 +166,30 @@ type RejectShadowAnalysis = {
   reviewCandidates: number;
   candidates: RejectShadowCandidate[];
   message: string;
+};
+
+type ShadowGateOverrideCandidate = {
+  candidateId: string;
+  candidateName: string;
+  rejectedGate: string;
+  matched: number;
+  postGateRejected: number;
+  finalSkipped: number;
+  buyExecuted: number;
+  settled: number;
+  monitorFailed: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  totalProfit: number;
+  entryConversionRate: number | null;
+  winRate: number | null;
+};
+
+type ShadowGateOverrideSummary = {
+  enabledForDemo2: boolean;
+  changesProductionTrading: boolean;
+  candidates: ShadowGateOverrideCandidate[];
 };
 
 type BreakdownItem = {
@@ -393,6 +418,7 @@ export default function Demo100DashboardPage() {
   const lastResult = runner?.lastResult ?? null;
   const rejectShadow = runner?.rejectShadow ?? null;
   const rejectShadowAnalysis = runner?.rejectShadowAnalysis ?? null;
+  const shadowGateOverrides = runner?.shadowGateOverrides ?? null;
   const robustDecision: RobustCandidateDecision | null =
     lastResult?.robustCandidateDecision ?? null;
   const robustMode = lastResult?.robustDemo2Mode ?? null;
@@ -735,6 +761,63 @@ export default function Demo100DashboardPage() {
               </p>
             )}
           </div>
+        </section>
+
+        <section className="mb-6 rounded-xl border border-emerald-700 bg-emerald-950/30 p-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-sm text-emerald-300">Demo2 Shadow Gate Overrides</p>
+              <h2 className="text-xl font-bold">例外通過から実約定までの乖離監視</h2>
+              <p className="mt-2 text-sm text-zinc-300">
+                条件一致数、後段Gate停止、最終判定停止、実約定、実勝率を候補別に比較します。
+              </p>
+            </div>
+            <StatusBadge
+              label={shadowGateOverrides?.enabledForDemo2 ? "Demo2有効" : "待機中"}
+              active={Boolean(shadowGateOverrides?.enabledForDemo2)}
+            />
+          </div>
+
+          {(shadowGateOverrides?.candidates.length ?? 0) > 0 ? (
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full min-w-[1050px] text-left text-sm">
+                <thead className="text-emerald-200">
+                  <tr className="border-b border-emerald-800">
+                    <th className="py-2">候補</th>
+                    <th className="py-2">一致</th>
+                    <th className="py-2">後段停止</th>
+                    <th className="py-2">最終停止</th>
+                    <th className="py-2">実約定</th>
+                    <th className="py-2">約定率</th>
+                    <th className="py-2">実勝敗</th>
+                    <th className="py-2">実勝率</th>
+                    <th className="py-2">実損益</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shadowGateOverrides?.candidates.map((item) => (
+                    <tr key={item.candidateId} className="border-b border-emerald-950">
+                      <td className="py-3 font-bold">{item.candidateName}</td>
+                      <td className="py-3">{item.matched}</td>
+                      <td className="py-3">{item.postGateRejected}</td>
+                      <td className="py-3">{item.finalSkipped}</td>
+                      <td className="py-3">{item.buyExecuted}</td>
+                      <td className="py-3">{formatPercent(item.entryConversionRate)}</td>
+                      <td className="py-3">
+                        {item.wins}勝 {item.losses}敗 {item.draws}分
+                      </td>
+                      <td className="py-3">{formatPercent(item.winRate)}</td>
+                      <td className="py-3">{formatProfit(item.totalProfit)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="mt-4 rounded-lg bg-zinc-950 p-4 text-sm text-zinc-400">
+              例外候補が一致すると、ここへ実運用との比較結果が表示されます。
+            </p>
+          )}
         </section>
 
         <ForwardSection title="Phase16-P 前向き検証" payload={phase16P} />

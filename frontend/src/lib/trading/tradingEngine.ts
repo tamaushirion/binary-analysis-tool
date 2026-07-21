@@ -19,6 +19,7 @@ import {
 import { buildFeatureSnapshot } from "@/lib/analysis/featureSnapshotBuilder";
 import { recordEntryFunnelEvent } from "@/lib/learning/entryFunnelStore";
 import type { Demo2RobustCandidateMatch } from "@/lib/learning/demo2RobustCandidateGate";
+import { updateDemo2ShadowOverrideRun } from "@/lib/entry/demo2ShadowOverrideStore";
 
 export type TradingEngineInput = {
   accountId: string;
@@ -171,6 +172,16 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
   });
 
   if (!entry.allow) {
+    if (entry.shadowGateOverride) {
+      updateDemo2ShadowOverrideRun({
+        overrideRunId: entry.shadowGateOverride.overrideRunId,
+        status: "POST_GATE_REJECTED",
+        detail: {
+          rejectStage: entry.rejectStage,
+          reason: entry.reason,
+        },
+      });
+    }
     recordEntryFunnelEvent({
       stage: entry.rejectStage,
       aiVersion: CURRENT_AI_VERSION,
@@ -212,6 +223,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       featureSnapshot: entry.featureSnapshot,
       finalScore: entry.finalScore,
       message: entry.message,
+      shadowGateOverride: entry.shadowGateOverride,
     };
   }
 
@@ -223,6 +235,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     patternWeight,
     robustHardGatePolicy,
     finalScore,
+    shadowGateOverride,
   } = entry;
   const empiricalScore = empiricalGate.adjustedScore;
 
@@ -270,6 +283,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       robustDemo2Mode: robustDemo2Mode.enabled,
       robustDemo2Candidate: robustDemo2Mode.candidate,
       robustPipeline,
+      shadowGateOverride,
       effectiveMinConfidence,
       source: "trading_engine_phase15_l_ai_version_save",
     },
@@ -284,7 +298,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     duration,
     durationUnit,
     currency: input.currency ?? "USD",
-    minScore: robustDemo2Mode.enabled
+    minScore: robustDemo2Mode.enabled || shadowGateOverride
       ? 40
       : coldStartDemoMode.enabled
         ? 35
@@ -293,6 +307,16 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
   });
 
   if (demoTrade.stage !== "demo_trade_executed") {
+    if (shadowGateOverride) {
+      updateDemo2ShadowOverrideRun({
+        overrideRunId: shadowGateOverride.overrideRunId,
+        status: "FINAL_SKIPPED",
+        detail: {
+          demoTradeStage: demoTrade.stage,
+          finalDecision: demoTrade.finalDecision,
+        },
+      });
+    }
     recordEntryFunnelEvent({
       stage: "engine_skipped_by_final_decision",
       aiVersion: CURRENT_AI_VERSION,
@@ -325,12 +349,20 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       finalScore,
       demoTrade,
       message: "Final Decision が SKIP のため監視・保存しませんでした",
+      shadowGateOverride,
     };
   }
 
   const contractId = demoTrade.buy?.contractId;
 
   if (!contractId) {
+    if (shadowGateOverride) {
+      updateDemo2ShadowOverrideRun({
+        overrideRunId: shadowGateOverride.overrideRunId,
+        status: "MONITOR_FAILED",
+        detail: { reason: "contractIdが取得できませんでした" },
+      });
+    }
     recordEntryFunnelEvent({
       stage: "engine_error",
       aiVersion: CURRENT_AI_VERSION,
@@ -361,6 +393,14 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       demoTrade,
       error: "contractId が取得できませんでした",
     };
+  }
+
+  if (shadowGateOverride) {
+    updateDemo2ShadowOverrideRun({
+      overrideRunId: shadowGateOverride.overrideRunId,
+      status: "BUY_EXECUTED",
+      contractId,
+    });
   }
 
   const maxWaitMs = durationToMs(duration, durationUnit) + 180_000;
@@ -398,6 +438,25 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
 
     demo100Notify = await notifyDemo100CompletedIfNeeded();
     demo100After = getDemo100Status();
+
+    if (shadowGateOverride) {
+      updateDemo2ShadowOverrideRun({
+        overrideRunId: shadowGateOverride.overrideRunId,
+        status: "SETTLED",
+        contractId: monitor.contractId,
+        tradeStatus: monitor.status,
+        profit: monitor.profit,
+      });
+    }
+  } else if (shadowGateOverride) {
+    updateDemo2ShadowOverrideRun({
+      overrideRunId: shadowGateOverride.overrideRunId,
+      status: "MONITOR_FAILED",
+      contractId,
+      tradeStatus: monitor.status,
+      profit: monitor.profit,
+      detail: { monitorStage: monitor.stage },
+    });
   }
 
   const fallbackBuyPrice =
@@ -466,6 +525,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     featureWinRateGate: featureGate,
     patternWeight,
     robustHardGatePolicy,
+    shadowGateOverride,
     featureSnapshot: snapshot,
     finalScore,
     demoTrade,
