@@ -1,8 +1,11 @@
 export type Demo2ShadowOverrideId =
   | "feature_hour_8"
+  | "feature_hour_9"
   | "feature_hour_12"
   | "feature_hour_16"
   | "feature_hour_18"
+  | "feature_hour_21"
+  | "empirical_rci52_oversold"
   | "empirical_rci52_strong_up";
 
 export type Demo2ShadowOverrideMatch = {
@@ -23,7 +26,7 @@ type AppliedGate = {
   overfitGuard?: string[];
 };
 
-const FEATURE_HOURS = new Set([8, 12, 16, 18]);
+const FEATURE_HOURS = new Set([8, 9, 12, 16, 18, 21]);
 const NEVER_OVERRIDE_TERMS = [
   "ATR異常",
   "急変動",
@@ -89,6 +92,20 @@ export function evaluateDemo2ShadowGateOverride(input: {
 
   if (input.rejectedGate === "engine_skipped_by_empirical_entry_gate") {
     const rci52 = finiteNumber(features.rci52);
+    if (rci52 !== null && rci52 <= -80) {
+      return {
+        enabled: true,
+        candidateId: "empirical_rci52_oversold",
+        candidateName: "Empirical拒否・RCI52 Oversold",
+        rejectedGate: input.rejectedGate,
+        conditionKey: "rci52",
+        conditionValue: "<=-80",
+        reasons: [
+          `RCI52 ${rci52}`,
+          "Shadow採用候補としてDemo2限定でEmpirical Gateを例外通過",
+        ],
+      };
+    }
     if (rci52 !== null && rci52 >= 50 && rci52 < 80) {
       return {
         enabled: true,
