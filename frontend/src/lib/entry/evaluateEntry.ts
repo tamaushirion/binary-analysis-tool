@@ -451,7 +451,11 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
       ? evaluateDemo2ShadowGateOverride({
           demo2Enabled,
           rejectedGate: "engine_skipped_by_feature_win_rate_gate",
-          features: featureSnapshot,
+          features: {
+            ...featureSnapshot,
+            shadowEntrySpot: input.features?.shadowEntrySpot,
+            shadowObservationEpoch: input.features?.shadowObservationEpoch,
+          },
           appliedGates: featureWinRateGate.applied,
         })
       : null;
@@ -460,8 +464,6 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
   }
   const shadowCanContinueFeature =
     shadowGateOverride !== null &&
-    shadowGateOverride.rejectedGate ===
-      "engine_skipped_by_feature_win_rate_gate" &&
     canContinueDemo2ShadowOverride({
       match: shadowGateOverride,
       appliedGates: featureWinRateGate.applied,
@@ -540,6 +542,12 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     featureApplied: featureWinRateGate.applied,
     patternApplied: patternWeight.applied,
   });
+  const shadowCanContinuePattern =
+    shadowGateOverride !== null &&
+    canContinueDemo2ShadowOverride({
+      match: shadowGateOverride,
+      appliedGates: patternWeight.applied,
+    });
   logGate({
     gateName: "pattern_weight",
     allow: patternWeight.allow,
@@ -559,6 +567,7 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
   if (
     !patternWeight.allow &&
     !input.coldStartEnabled &&
+    !shadowCanContinuePattern &&
     (!robustEnabled || hasPatternHardGate)
   ) {
     const reason = patternWeight.reasons.join(" / ");
