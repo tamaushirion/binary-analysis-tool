@@ -5,6 +5,7 @@ export type Demo2ShadowOverrideRunStatus =
   | "MATCHED"
   | "POST_GATE_REJECTED"
   | "FINAL_SKIPPED"
+  | "EXECUTION_FAILED"
   | "BUY_EXECUTED"
   | "SETTLED"
   | "MONITOR_FAILED";
@@ -135,6 +136,7 @@ type SummaryRow = {
   matched: number;
   postGateRejected: number;
   finalSkipped: number;
+  executionFailed: number;
   buyExecuted: number;
   settled: number;
   monitorFailed: number;
@@ -151,6 +153,7 @@ export function getDemo2ShadowOverrideSummary() {
               rejected_gate AS rejectedGate, COUNT(*) AS matched,
               SUM(status = 'POST_GATE_REJECTED') AS postGateRejected,
               SUM(status = 'FINAL_SKIPPED') AS finalSkipped,
+              SUM(status = 'EXECUTION_FAILED') AS executionFailed,
               SUM(status IN ('BUY_EXECUTED','SETTLED','MONITOR_FAILED')) AS buyExecuted,
               SUM(status = 'SETTLED') AS settled,
               SUM(status = 'MONITOR_FAILED') AS monitorFailed,

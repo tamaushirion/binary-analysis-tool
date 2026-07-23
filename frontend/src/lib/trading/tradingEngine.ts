@@ -289,22 +289,71 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     },
   });
 
-  const demoTrade = await executeDemoTrade({
-    accountId: input.accountId,
-    pair: input.pair,
-    direction: effectiveDirection,
-    score: finalScore,
-    amount: input.amount ?? 1,
-    duration,
-    durationUnit,
-    currency: input.currency ?? "USD",
-    minScore: robustDemo2Mode.enabled || shadowGateOverride
-      ? 40
-      : coldStartDemoMode.enabled
-        ? 35
-        : input.minScore ?? 80,
-    minPayoutRate: input.minPayoutRate ?? 1.8,
-  });
+  let demoTrade;
+  try {
+    demoTrade = await executeDemoTrade({
+      accountId: input.accountId,
+      pair: input.pair,
+      direction: effectiveDirection,
+      score: finalScore,
+      amount: input.amount ?? 1,
+      duration,
+      durationUnit,
+      currency: input.currency ?? "USD",
+      minScore: robustDemo2Mode.enabled || shadowGateOverride
+        ? 40
+        : coldStartDemoMode.enabled
+          ? 35
+          : input.minScore ?? 80,
+      minPayoutRate: input.minPayoutRate ?? 1.8,
+    });
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Demo Trade実行中に不明なエラーが発生しました";
+
+    if (shadowGateOverride) {
+      updateDemo2ShadowOverrideRun({
+        overrideRunId: shadowGateOverride.overrideRunId,
+        status: "EXECUTION_FAILED",
+        detail: { message },
+      });
+    }
+    recordEntryFunnelEvent({
+      stage: "engine_error",
+      aiVersion: CURRENT_AI_VERSION,
+      pair: input.pair,
+      direction: effectiveDirection,
+      inputScore: input.score,
+      finalScore,
+      confidence: confidence.confidence,
+      reason: message,
+      details: { shadowGateOverride },
+    });
+
+    return {
+      ok: false,
+      stage: "engine_error",
+      demo100: demo100Before,
+      coldStartDemoMode,
+      verificationMode,
+      robustDemo2Mode,
+      learning,
+      similarity,
+      confidence,
+      entryGate: gate,
+      empiricalEntryGate: empiricalGate,
+      featureWinRateGate: featureGate,
+      patternWeight,
+      robustHardGatePolicy,
+      shadowGateOverride,
+      featureSnapshot: snapshot,
+      finalScore,
+      error: message,
+      message: "候補はGateを通過しましたが、Demo Trade実行に失敗しました",
+    };
+  }
 
   if (demoTrade.stage !== "demo_trade_executed") {
     if (shadowGateOverride) {
