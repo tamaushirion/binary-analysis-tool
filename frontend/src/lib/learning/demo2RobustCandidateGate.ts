@@ -11,9 +11,12 @@ export type Demo2RobustCandidateMatch = {
   enabled: true;
   candidateId: Demo2RobustCandidateId;
   candidateName: string;
+  executionMode: "FORWARD" | "REVERSE";
+  originalDirection: Demo2RobustDirection;
   direction: Demo2RobustDirection;
   directionalScore: number;
   historicalSample: number;
+  originalHistoricalWinRate: number;
   historicalWinRate: number;
   recentWinRate: number;
   historicalProfit: number;
@@ -55,6 +58,8 @@ export type Demo2RobustFeatureInput = {
 };
 
 const EVALUATED_CANDIDATES = 5;
+const MIN_FORWARD_WIN_RATE = 58;
+const MAX_REVERSE_SOURCE_WIN_RATE = 42;
 
 function finiteNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -78,12 +83,54 @@ function exactInteger(value: number | null, expected: number): boolean {
 }
 
 function buildAllowDecision(
-  match: Demo2RobustCandidateMatch,
+  match: Omit<
+    Demo2RobustCandidateMatch,
+    | "executionMode"
+    | "originalDirection"
+    | "direction"
+    | "originalHistoricalWinRate"
+  >,
+  originalDirection: Demo2RobustDirection,
 ): Demo2RobustCandidateDecision {
+  const executionMode =
+    originalDirection === "HIGH" ? "FORWARD" : "REVERSE";
+  const originalHistoricalWinRate =
+    executionMode === "FORWARD"
+      ? match.historicalWinRate
+      : 100 - match.historicalWinRate;
+  const direction: Demo2RobustDirection = "HIGH";
+  const validHistoricalEdge =
+    executionMode === "FORWARD"
+      ? originalHistoricalWinRate >= MIN_FORWARD_WIN_RATE
+      : originalHistoricalWinRate <= MAX_REVERSE_SOURCE_WIN_RATE &&
+        match.historicalWinRate >= MIN_FORWARD_WIN_RATE;
+
+  if (!validHistoricalEdge) {
+    return {
+      allow: false,
+      match: null,
+      evaluatedCandidates: EVALUATED_CANDIDATES,
+      message:
+        "元方向の勝率が通常・逆エントリーの固定基準を満たさないため採用しません。",
+      reasons: [
+        `実行方式 ${executionMode}`,
+        `元方向勝率 ${originalHistoricalWinRate.toFixed(2)}%`,
+        `通常採用基準 ${MIN_FORWARD_WIN_RATE}%以上`,
+        `逆採用基準 元方向${MAX_REVERSE_SOURCE_WIN_RATE}%以下かつ反転後${MIN_FORWARD_WIN_RATE}%以上`,
+      ],
+    };
+  }
+
   return {
     allow: true,
     evaluatedCandidates: EVALUATED_CANDIDATES,
-    match,
+    match: {
+      ...match,
+      executionMode,
+      originalDirection,
+      direction,
+      originalHistoricalWinRate,
+    },
     message:
       "Phase16-T固定Demo2候補に一致しました。優先順位により1候補だけ採用します。",
   };
@@ -101,6 +148,12 @@ export function evaluateDemo2RobustCandidate(
   const weekday = finiteNumber(input.weekday);
   const atr = finiteNumber(input.atr);
   const latestClose = finiteNumber(input.latestClose);
+  const selectedDirection =
+    input.selectedDirection === "LOW"
+      ? "LOW"
+      : input.selectedDirection === "HIGH"
+        ? "HIGH"
+        : null;
 
   const safetyReasons: string[] = [];
 
@@ -126,6 +179,17 @@ export function evaluateDemo2RobustCandidate(
     };
   }
 
+  if (selectedDirection === null) {
+    return {
+      allow: false,
+      match: null,
+      evaluatedCandidates: EVALUATED_CANDIDATES,
+      message:
+        "元シグナル方向を確認できないため、通常・逆エントリーを選択できません。",
+      reasons: ["元方向 unknown", "必要な元方向 HIGH または LOW"],
+    };
+  }
+
   // 優先順位1:
   // Hour=7 × LowScore=40-49 → HIGH
   // Phase16-T REVERSE安定性最有力。
@@ -134,7 +198,6 @@ export function evaluateDemo2RobustCandidate(
       enabled: true,
       candidateId: "phase16_t_hour7_lowscore40_high",
       candidateName: "Hour7・LowScore40安定型",
-      direction: "HIGH",
       directionalScore: highScore ?? 0,
       historicalSample: 147,
       historicalWinRate: 59.86,
@@ -149,7 +212,7 @@ export function evaluateDemo2RobustCandidate(
         "Phase16-T REVERSE安定性最有力",
         "Backtest値を条件に使用しない",
       ],
-    });
+    }, selectedDirection);
   }
 
   // 優先順位2:
@@ -160,7 +223,6 @@ export function evaluateDemo2RobustCandidate(
       enabled: true,
       candidateId: "phase16_t_rci52_oversold_rci9_oversold_high",
       candidateName: "RCI52・RCI9ダブルOversold高勝率型",
-      direction: "HIGH",
       directionalScore: highScore ?? 0,
       historicalSample: 102,
       historicalWinRate: 63.73,
@@ -175,7 +237,7 @@ export function evaluateDemo2RobustCandidate(
         "Phase16-T REVERSE高勝率最有力",
         "Backtest値を条件に使用しない",
       ],
-    });
+    }, selectedDirection);
   }
 
   // 優先順位3:
@@ -186,7 +248,6 @@ export function evaluateDemo2RobustCandidate(
       enabled: true,
       candidateId: "phase16_t_rci26_strongup_rci52_strongdown_high",
       candidateName: "RCI26 StrongUp・RCI52 StrongDown最近強化型",
-      direction: "HIGH",
       directionalScore: highScore ?? 0,
       historicalSample: 109,
       historicalWinRate: 59.63,
@@ -201,7 +262,7 @@ export function evaluateDemo2RobustCandidate(
         "Phase16-T最近強化型",
         "Backtest値を条件に使用しない",
       ],
-    });
+    }, selectedDirection);
   }
 
   // 優先順位4:
@@ -212,7 +273,6 @@ export function evaluateDemo2RobustCandidate(
       enabled: true,
       candidateId: "phase16_t_lowscore80_weekday5_high",
       candidateName: "LowScore80・Weekday5高勝率型",
-      direction: "HIGH",
       directionalScore: highScore ?? 0,
       historicalSample: 141,
       historicalWinRate: 62.41,
@@ -228,7 +288,7 @@ export function evaluateDemo2RobustCandidate(
         "Demo候補別実績で厳格監視",
         "Backtest値を条件に使用しない",
       ],
-    });
+    }, selectedDirection);
   }
 
   // 優先順位5:
@@ -239,7 +299,6 @@ export function evaluateDemo2RobustCandidate(
       enabled: true,
       candidateId: "phase16_t_rci52_strongup_weekday3_high",
       candidateName: "RCI52 StrongUp・Weekday3高勝率型",
-      direction: "HIGH",
       directionalScore: highScore ?? 0,
       historicalSample: 115,
       historicalWinRate: 62.61,
@@ -255,7 +314,7 @@ export function evaluateDemo2RobustCandidate(
         "Demo候補別実績で厳格監視",
         "Backtest値を条件に使用しない",
       ],
-    });
+    }, selectedDirection);
   }
 
   return {

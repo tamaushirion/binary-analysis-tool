@@ -434,7 +434,6 @@ async function runOnce() {
         textOrNull((debug.asset as any)?.pair) ??
         "Volatility 100 Index",
       direction:
-        robustMatch?.direction ??
         normalizedProvider.direction ??
         directionOrNull(debug.selectedDirection) ??
         "HIGH",

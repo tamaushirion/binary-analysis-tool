@@ -113,15 +113,30 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       : "通常運用",
   };
 
-  const effectiveDirection: "HIGH" | "LOW" = input.demoPart2RobustCandidate?.enabled === true ? input.demoPart2RobustCandidate.direction : input.direction;
+  const robustCandidate = input.demoPart2RobustCandidate ?? null;
+  const robustDirectionValidated =
+    robustCandidate?.enabled === true &&
+    robustCandidate.originalDirection === input.direction &&
+    ((robustCandidate.executionMode === "FORWARD" &&
+      robustCandidate.direction === input.direction &&
+      robustCandidate.originalHistoricalWinRate >= 58) ||
+      (robustCandidate.executionMode === "REVERSE" &&
+        robustCandidate.direction !== input.direction &&
+        robustCandidate.originalHistoricalWinRate <= 42 &&
+        robustCandidate.historicalWinRate >= 58));
+  const effectiveDirection: "HIGH" | "LOW" = robustDirectionValidated
+    ? robustCandidate.direction
+    : input.direction;
 
   const robustDemo2Mode = {
-    enabled: input.demoPart2RobustCandidate?.enabled === true,
-    candidate: input.demoPart2RobustCandidate ?? null,
+    enabled: robustDirectionValidated,
+    candidate: robustDirectionValidated ? robustCandidate : null,
     reason:
-      input.demoPart2RobustCandidate?.enabled === true
-        ? `Demo Part2 Robust候補: ${input.demoPart2RobustCandidate.candidateName}`
-        : "通常Gate判定",
+      robustDirectionValidated
+        ? `Demo Part2 Robust${robustCandidate.executionMode === "REVERSE" ? "逆" : "通常"}候補: ${robustCandidate.candidateName} (${robustCandidate.originalDirection} → ${robustCandidate.direction})`
+        : robustCandidate?.enabled === true
+          ? "Robust候補の元方向・発注方向・固定勝率基準が一致しないため通常Gate判定"
+          : "通常Gate判定",
   };
 
   const robustPipeline = {
@@ -239,7 +254,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
   } = entry;
   const empiricalScore = empiricalGate.adjustedScore;
 
-  const snapshot = buildFeatureSnapshot({
+  const builtSnapshot = buildFeatureSnapshot({
     pair: input.pair,
     direction: effectiveDirection,
     score: input.score,
@@ -288,6 +303,13 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       source: "trading_engine_phase15_l_ai_version_save",
     },
   });
+  const snapshot: TradeFeatureSnapshot = {
+    ...builtSnapshot,
+    robustDemo2Mode,
+    robustDemo2Candidate: robustDemo2Mode.candidate,
+    robustPipeline,
+    shadowGateOverride,
+  };
 
   let demoTrade;
   try {
