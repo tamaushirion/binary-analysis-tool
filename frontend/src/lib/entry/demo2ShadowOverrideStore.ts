@@ -146,6 +146,96 @@ type SummaryRow = {
   totalProfit: number;
 };
 
+export type Demo2ActualCandidateClassification =
+  | "COLLECTING"
+  | "WATCH"
+  | "PROVEN"
+  | "GATE_CANDIDATE"
+  | "REVERSE_CANDIDATE";
+
+function classifyActualCandidate(input: {
+  settled: number;
+  wins: number;
+  losses: number;
+  totalProfit: number;
+}) {
+  const decided = input.wins + input.losses;
+  const winRate = decided > 0 ? (input.wins / decided) * 100 : null;
+  if (
+    decided >= 50 &&
+    winRate !== null &&
+    winRate <= 42 &&
+    input.totalProfit < 0
+  ) {
+    return {
+      classification: "REVERSE_CANDIDATE" as const,
+      blocksForwardEntry: true,
+      reason: "実決着50件以上・勝率42%以下・損益マイナスのため逆方向検証候補",
+    };
+  }
+  if (
+    decided >= 30 &&
+    winRate !== null &&
+    winRate < 52.08 &&
+    input.totalProfit < 0
+  ) {
+    return {
+      classification: "GATE_CANDIDATE" as const,
+      blocksForwardEntry: true,
+      reason: "実決着30件以上・損益分岐勝率52.08%未満・損益マイナスのためGate候補",
+    };
+  }
+  if (
+    decided >= 50 &&
+    winRate !== null &&
+    winRate >= 58 &&
+    input.totalProfit > 0
+  ) {
+    return {
+      classification: "PROVEN" as const,
+      blocksForwardEntry: false,
+      reason: "実決着50件以上・勝率58%以上・損益プラス",
+    };
+  }
+  if (decided < 20) {
+    return {
+      classification: "COLLECTING" as const,
+      blocksForwardEntry: false,
+      reason: `実決着${decided}件。20件までは収集中`,
+    };
+  }
+  return {
+    classification: "WATCH" as const,
+    blocksForwardEntry: false,
+    reason: "実成績を継続監視中",
+  };
+}
+
+export function getDemo2ActualCandidateDecision(candidateId: string) {
+  const row = db
+    .prepare(
+      `SELECT
+         SUM(status = 'SETTLED') AS settled,
+         SUM(status = 'SETTLED' AND (trade_status IN ('WIN','WON') OR profit > 0)) AS wins,
+         SUM(status = 'SETTLED' AND (trade_status IN ('LOST','LOSS') OR profit < 0)) AS losses,
+         ROUND(COALESCE(SUM(CASE WHEN status = 'SETTLED' THEN profit ELSE 0 END), 0), 4) AS totalProfit
+       FROM demo2_shadow_override_runs
+       WHERE candidate_id = ?`,
+    )
+    .get(candidateId) as {
+    settled: number | null;
+    wins: number | null;
+    losses: number | null;
+    totalProfit: number | null;
+  };
+  return classifyActualCandidate({
+    settled: Number(row.settled ?? 0),
+    wins: Number(row.wins ?? 0),
+    losses: Number(row.losses ?? 0),
+    totalProfit: Number(row.totalProfit ?? 0),
+  });
+}
+
 export function getDemo2ShadowOverrideSummary() {
   const rows = db
     .prepare(
@@ -169,18 +259,34 @@ export function getDemo2ShadowOverrideSummary() {
   return {
     ok: true as const,
     stage: "demo2_shadow_override_summary" as const,
-    candidates: rows.map((row) => ({
-      ...row,
-      entryConversionRate:
+    candidates: rows.map((row) => {
+      const actualDecision = classifyActualCandidate(row);
+      return {
+        ...row,
+        entryConversionRate:
         row.matched > 0
           ? Math.round((row.buyExecuted / row.matched) * 10000) / 100
           : null,
-      winRate:
+        winRate:
         row.wins + row.losses > 0
           ? Math.round((row.wins / (row.wins + row.losses)) * 10000) / 100
           : null,
-    })),
+        ...actualDecision,
+        remainingToGate: Math.max(0, 30 - (row.wins + row.losses)),
+        remainingToReverse: Math.max(0, 50 - (row.wins + row.losses)),
+      };
+    }),
     enabledForDemo2: true,
     changesProductionTrading: false,
+    actualEntryLearningEnabled: true,
+    thresholds: {
+      collectingMinimum: 20,
+      gateMinimum: 30,
+      breakEvenWinRate: 52.08,
+      reverseMinimum: 50,
+      reverseMaximumWinRate: 42,
+      provenMinimum: 50,
+      provenMinimumWinRate: 58,
+    },
   };
 }
