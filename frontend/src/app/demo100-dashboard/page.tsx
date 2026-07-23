@@ -185,6 +185,7 @@ type ShadowGateOverrideCandidate = {
   totalProfit: number;
   entryConversionRate: number | null;
   winRate: number | null;
+  originalWinRate: number | null;
   classification:
     | "COLLECTING"
     | "WATCH"
@@ -192,6 +193,7 @@ type ShadowGateOverrideCandidate = {
     | "GATE_CANDIDATE"
     | "REVERSE_CANDIDATE";
   blocksForwardEntry: boolean;
+  reverseEligible: boolean;
   reason: string;
   remainingToGate: number;
   remainingToReverse: number;
@@ -804,8 +806,10 @@ export default function Demo100DashboardPage() {
                     <th className="py-2">約定率</th>
                     <th className="py-2">実勝敗</th>
                     <th className="py-2">実勝率</th>
+                    <th className="py-2">元方向勝率</th>
                     <th className="py-2">実損益</th>
                     <th className="py-2">実成績判定</th>
+                    <th className="py-2">次回の発注</th>
                     <th className="py-2">次の基準まで</th>
                   </tr>
                 </thead>
@@ -823,12 +827,20 @@ export default function Demo100DashboardPage() {
                         {item.wins}勝 {item.losses}敗 {item.draws}分
                       </td>
                       <td className="py-3">{formatPercent(item.winRate)}</td>
+                      <td className="py-3">{formatPercent(item.originalWinRate)}</td>
                       <td className="py-3">{formatProfit(item.totalProfit)}</td>
                       <td className="py-3">
                         <div className="font-bold">{item.classification}</div>
                         <div className="mt-1 max-w-[300px] text-xs text-zinc-400">
                           {item.reason}
                         </div>
+                      </td>
+                      <td className="py-3 font-bold">
+                        {item.reverseEligible
+                          ? "逆方向"
+                          : item.blocksForwardEntry
+                            ? "停止"
+                            : "元方向"}
                       </td>
                       <td className="py-3 text-xs">
                         Gate判定まで {item.remainingToGate}件

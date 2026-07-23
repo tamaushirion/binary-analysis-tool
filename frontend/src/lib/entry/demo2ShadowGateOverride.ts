@@ -17,6 +17,11 @@ export type Demo2ShadowOverrideMatch = {
     | "engine_skipped_by_feature_win_rate_gate";
   conditionKey: "hour" | "rci52";
   conditionValue: string;
+  executionMode: "FORWARD" | "REVERSE";
+  originalDirection: "HIGH" | "LOW";
+  direction: "HIGH" | "LOW";
+  actualWinRate: number | null;
+  actualDecided: number;
   reasons: string[];
 };
 
@@ -68,6 +73,7 @@ export function canContinueDemo2ShadowOverride(input: {
 export function evaluateDemo2ShadowGateOverride(input: {
   demo2Enabled: boolean;
   rejectedGate: Demo2ShadowOverrideMatch["rejectedGate"];
+  direction: "HIGH" | "LOW";
   features?: Record<string, unknown> | null;
   appliedGates?: AppliedGate[];
 }): Demo2ShadowOverrideMatch | null {
@@ -123,7 +129,14 @@ export function evaluateDemo2ShadowGateOverride(input: {
                   value: ">=80",
                 };
     const decision = getDemo2ActualCandidateDecision(band.id);
-    if (decision.blocksForwardEntry) return null;
+    if (decision.blocksForwardEntry && !decision.reverseEligible) return null;
+    const executionMode = decision.reverseEligible ? "REVERSE" : "FORWARD";
+    const direction =
+      executionMode === "REVERSE"
+        ? input.direction === "HIGH"
+          ? "LOW"
+          : "HIGH"
+        : input.direction;
     return {
       enabled: true,
       candidateId: band.id,
@@ -131,6 +144,11 @@ export function evaluateDemo2ShadowGateOverride(input: {
       rejectedGate: input.rejectedGate,
       conditionKey: "rci52",
       conditionValue: band.value,
+      executionMode,
+      originalDirection: input.direction,
+      direction,
+      actualWinRate: decision.winRate,
+      actualDecided: decision.decided,
       reasons: [
         `RCI52 ${rci52}`,
         `実エントリー学習 ${decision.classification}`,
@@ -145,7 +163,14 @@ export function evaluateDemo2ShadowGateOverride(input: {
   }
   const candidateId = `feature_hour_${hour}` as const;
   const decision = getDemo2ActualCandidateDecision(candidateId);
-  if (decision.blocksForwardEntry) return null;
+  if (decision.blocksForwardEntry && !decision.reverseEligible) return null;
+  const executionMode = decision.reverseEligible ? "REVERSE" : "FORWARD";
+  const direction =
+    executionMode === "REVERSE"
+      ? input.direction === "HIGH"
+        ? "LOW"
+        : "HIGH"
+      : input.direction;
 
   return {
     enabled: true,
@@ -154,6 +179,11 @@ export function evaluateDemo2ShadowGateOverride(input: {
     rejectedGate: input.rejectedGate,
     conditionKey: "hour",
     conditionValue: String(hour),
+    executionMode,
+    originalDirection: input.direction,
+    direction,
+    actualWinRate: decision.winRate,
+    actualDecided: decision.decided,
     reasons: [
       `Hour ${hour}`,
       `実エントリー学習 ${decision.classification}`,

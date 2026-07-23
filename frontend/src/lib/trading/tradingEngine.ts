@@ -253,10 +253,20 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     shadowGateOverride,
   } = entry;
   const empiricalScore = empiricalGate.adjustedScore;
+  const shadowReverseValidated =
+    shadowGateOverride?.executionMode === "REVERSE" &&
+    shadowGateOverride.originalDirection === effectiveDirection &&
+    shadowGateOverride.direction !== effectiveDirection &&
+    shadowGateOverride.actualDecided >= 30 &&
+    shadowGateOverride.actualWinRate !== null &&
+    shadowGateOverride.actualWinRate <= 42;
+  const executionDirection: "HIGH" | "LOW" = shadowReverseValidated
+    ? shadowGateOverride.direction
+    : effectiveDirection;
 
   const builtSnapshot = buildFeatureSnapshot({
     pair: input.pair,
-    direction: effectiveDirection,
+    direction: executionDirection,
     score: input.score,
     weightScore: learning.adjustedScore,
     similarityScore: similarity.adjustedScore,
@@ -299,6 +309,11 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       robustDemo2Candidate: robustDemo2Mode.candidate,
       robustPipeline,
       shadowGateOverride,
+      actualEntryExecution: {
+        mode: shadowReverseValidated ? "REVERSE" : "FORWARD",
+        originalDirection: effectiveDirection,
+        executionDirection,
+      },
       effectiveMinConfidence,
       source: "trading_engine_phase15_l_ai_version_save",
     },
@@ -316,7 +331,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     demoTrade = await executeDemoTrade({
       accountId: input.accountId,
       pair: input.pair,
-      direction: effectiveDirection,
+      direction: executionDirection,
       score: finalScore,
       amount: input.amount ?? 1,
       duration,
@@ -346,7 +361,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       stage: "engine_error",
       aiVersion: CURRENT_AI_VERSION,
       pair: input.pair,
-      direction: effectiveDirection,
+      direction: executionDirection,
       inputScore: input.score,
       finalScore,
       confidence: confidence.confidence,
@@ -392,7 +407,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       stage: "engine_skipped_by_final_decision",
       aiVersion: CURRENT_AI_VERSION,
       pair: input.pair,
-      direction: effectiveDirection,
+      direction: executionDirection,
       inputScore: input.score,
       finalScore,
       confidence: confidence.confidence,
@@ -438,7 +453,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       stage: "engine_error",
       aiVersion: CURRENT_AI_VERSION,
       pair: input.pair,
-      direction: effectiveDirection,
+      direction: executionDirection,
       inputScore: input.score,
       finalScore,
       confidence: confidence.confidence,
@@ -492,7 +507,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
       contractId: monitor.contractId,
       proposalId: demoTrade.proposal?.proposalId ?? null,
       pair: input.pair,
-      direction: effectiveDirection,
+      direction: executionDirection,
       score: finalScore,
       payoutRate: demoTrade.proposal?.payoutRate ?? null,
       buyPrice: monitor.buyPrice,
@@ -541,7 +556,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     await sendLinePushMessage({
       text: createTradeResultLineText({
         pair: input.pair,
-        direction: effectiveDirection,
+        direction: executionDirection,
         status: monitor.status,
         buyPrice: fallbackBuyPrice,
         profit: monitor.profit,
@@ -570,7 +585,7 @@ export async function executeDemoTradingEngine(input: TradingEngineInput) {
     stage: monitor.ok ? "engine_completed" : "engine_monitor_failed",
     aiVersion: CURRENT_AI_VERSION,
     pair: input.pair,
-    direction: effectiveDirection,
+    direction: executionDirection,
     inputScore: input.score,
     finalScore,
     confidence: confidence.confidence,
