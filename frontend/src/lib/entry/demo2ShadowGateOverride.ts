@@ -1,12 +1,12 @@
+import { getDemo2ActualCandidateDecision } from "@/lib/entry/demo2ShadowOverrideStore";
+
 export type Demo2ShadowOverrideId =
-  | "feature_hour_8"
-  | "feature_hour_9"
-  | "feature_hour_12"
-  | "feature_hour_16"
-  | "feature_hour_18"
-  | "feature_hour_21"
+  | `feature_hour_${number}`
   | "empirical_rci52_oversold"
-  | "empirical_rci52_strong_up";
+  | "empirical_rci52_strong_down"
+  | "empirical_rci52_neutral"
+  | "empirical_rci52_strong_up"
+  | "empirical_rci52_overbought";
 
 export type Demo2ShadowOverrideMatch = {
   enabled: true;
@@ -26,7 +26,6 @@ type AppliedGate = {
   overfitGuard?: string[];
 };
 
-const FEATURE_HOURS = new Set([8, 9, 12, 16, 18, 21]);
 const NEVER_OVERRIDE_TERMS = [
   "ATR異常",
   "急変動",
@@ -92,52 +91,73 @@ export function evaluateDemo2ShadowGateOverride(input: {
 
   if (input.rejectedGate === "engine_skipped_by_empirical_entry_gate") {
     const rci52 = finiteNumber(features.rci52);
-    if (rci52 !== null && rci52 <= -80) {
-      return {
-        enabled: true,
-        candidateId: "empirical_rci52_oversold",
-        candidateName: "Empirical拒否・RCI52 Oversold",
-        rejectedGate: input.rejectedGate,
-        conditionKey: "rci52",
-        conditionValue: "<=-80",
-        reasons: [
-          `RCI52 ${rci52}`,
-          "Shadow採用候補としてDemo2限定でEmpirical Gateを例外通過",
-        ],
-      };
-    }
-    if (rci52 !== null && rci52 >= 50 && rci52 < 80) {
-      return {
-        enabled: true,
-        candidateId: "empirical_rci52_strong_up",
-        candidateName: "Empirical拒否・RCI52 Strong Up",
-        rejectedGate: input.rejectedGate,
-        conditionKey: "rci52",
-        conditionValue: "50-79",
-        reasons: [
-          `RCI52 ${rci52}`,
-          "Shadow採用候補としてDemo2限定でEmpirical Gateを例外通過",
-        ],
-      };
-    }
-    return null;
+    if (rci52 === null) return null;
+    const band =
+      rci52 <= -80
+        ? {
+            id: "empirical_rci52_oversold" as const,
+            name: "RCI52 Oversold",
+            value: "<=-80",
+          }
+        : rci52 < -50
+          ? {
+              id: "empirical_rci52_strong_down" as const,
+              name: "RCI52 Strong Down",
+              value: "-79--51",
+            }
+          : rci52 < 50
+            ? {
+                id: "empirical_rci52_neutral" as const,
+                name: "RCI52 Neutral",
+                value: "-50-49",
+              }
+            : rci52 < 80
+              ? {
+                  id: "empirical_rci52_strong_up" as const,
+                  name: "RCI52 Strong Up",
+                  value: "50-79",
+                }
+              : {
+                  id: "empirical_rci52_overbought" as const,
+                  name: "RCI52 Overbought",
+                  value: ">=80",
+                };
+    const decision = getDemo2ActualCandidateDecision(band.id);
+    if (decision.blocksForwardEntry) return null;
+    return {
+      enabled: true,
+      candidateId: band.id,
+      candidateName: `Empirical拒否・${band.name}`,
+      rejectedGate: input.rejectedGate,
+      conditionKey: "rci52",
+      conditionValue: band.value,
+      reasons: [
+        `RCI52 ${rci52}`,
+        `実エントリー学習 ${decision.classification}`,
+        "Demo2限定でEmpirical Gateを外し、実約定結果を収集",
+      ],
+    };
   }
 
   const hour = finiteNumber(features.hour);
-  if (hour === null || !Number.isInteger(hour) || !FEATURE_HOURS.has(hour)) {
+  if (hour === null || !Number.isInteger(hour) || hour < 0 || hour > 23) {
     return null;
   }
+  const candidateId = `feature_hour_${hour}` as const;
+  const decision = getDemo2ActualCandidateDecision(candidateId);
+  if (decision.blocksForwardEntry) return null;
 
   return {
     enabled: true,
-    candidateId: `feature_hour_${hour}` as Demo2ShadowOverrideId,
+    candidateId,
     candidateName: `Feature拒否・Hour ${hour}`,
     rejectedGate: input.rejectedGate,
     conditionKey: "hour",
     conditionValue: String(hour),
     reasons: [
       `Hour ${hour}`,
-      "Shadow採用候補としてDemo2限定でFeature Gateを例外通過",
+      `実エントリー学習 ${decision.classification}`,
+      "Demo2限定でFeature Gateを外し、実約定結果を収集",
     ],
   };
 }

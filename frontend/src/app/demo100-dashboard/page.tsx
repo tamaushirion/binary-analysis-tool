@@ -185,11 +185,22 @@ type ShadowGateOverrideCandidate = {
   totalProfit: number;
   entryConversionRate: number | null;
   winRate: number | null;
+  classification:
+    | "COLLECTING"
+    | "WATCH"
+    | "PROVEN"
+    | "GATE_CANDIDATE"
+    | "REVERSE_CANDIDATE";
+  blocksForwardEntry: boolean;
+  reason: string;
+  remainingToGate: number;
+  remainingToReverse: number;
 };
 
 type ShadowGateOverrideSummary = {
   enabledForDemo2: boolean;
   changesProductionTrading: boolean;
+  actualEntryLearningEnabled: boolean;
   candidates: ShadowGateOverrideCandidate[];
 };
 
@@ -767,10 +778,10 @@ export default function Demo100DashboardPage() {
         <section className="mb-6 rounded-xl border border-emerald-700 bg-emerald-950/30 p-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <p className="text-sm text-emerald-300">Demo2 Shadow Gate Overrides</p>
-              <h2 className="text-xl font-bold">例外通過から実約定までの乖離監視</h2>
+              <p className="text-sm text-emerald-300">Demo2 Actual Entry Learning</p>
+              <h2 className="text-xl font-bold">Gateなし実エントリー成績・候補判定</h2>
               <p className="mt-2 text-sm text-zinc-300">
-                条件一致数、後段Gate停止、最終判定停止、実約定、実勝率を候補別に比較します。
+                Demo2限定で従来の学習Gateを外した実約定を条件別に集計します。弱い条件はGate候補、極端に弱い条件は逆エントリー候補に分類します。
               </p>
             </div>
             <StatusBadge
@@ -781,7 +792,7 @@ export default function Demo100DashboardPage() {
 
           {(shadowGateOverrides?.candidates.length ?? 0) > 0 ? (
             <div className="mt-4 overflow-x-auto">
-              <table className="w-full min-w-[1050px] text-left text-sm">
+              <table className="w-full min-w-[1380px] text-left text-sm">
                 <thead className="text-emerald-200">
                   <tr className="border-b border-emerald-800">
                     <th className="py-2">候補</th>
@@ -794,6 +805,8 @@ export default function Demo100DashboardPage() {
                     <th className="py-2">実勝敗</th>
                     <th className="py-2">実勝率</th>
                     <th className="py-2">実損益</th>
+                    <th className="py-2">実成績判定</th>
+                    <th className="py-2">次の基準まで</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -811,6 +824,17 @@ export default function Demo100DashboardPage() {
                       </td>
                       <td className="py-3">{formatPercent(item.winRate)}</td>
                       <td className="py-3">{formatProfit(item.totalProfit)}</td>
+                      <td className="py-3">
+                        <div className="font-bold">{item.classification}</div>
+                        <div className="mt-1 max-w-[300px] text-xs text-zinc-400">
+                          {item.reason}
+                        </div>
+                      </td>
+                      <td className="py-3 text-xs">
+                        Gate判定まで {item.remainingToGate}件
+                        <br />
+                        逆候補判定まで {item.remainingToReverse}件
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -818,7 +842,7 @@ export default function Demo100DashboardPage() {
             </div>
           ) : (
             <p className="mt-4 rounded-lg bg-zinc-950 p-4 text-sm text-zinc-400">
-              例外候補が一致すると、ここへ実運用との比較結果が表示されます。
+              Gateなし実エントリーが発生すると、ここへ条件別の実成績が表示されます。
             </p>
           )}
         </section>
