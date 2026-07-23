@@ -38,6 +38,25 @@ function ensureTable() {
     CREATE INDEX IF NOT EXISTS idx_demo2_shadow_override_created
     ON demo2_shadow_override_runs(created_at);
   `);
+  const columns = db
+    .prepare("PRAGMA table_info(demo2_shadow_override_runs)")
+    .all() as Array<{ name: string }>;
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("execution_mode")) {
+    db.exec(
+      "ALTER TABLE demo2_shadow_override_runs ADD COLUMN execution_mode TEXT",
+    );
+  }
+  if (!names.has("original_direction")) {
+    db.exec(
+      "ALTER TABLE demo2_shadow_override_runs ADD COLUMN original_direction TEXT",
+    );
+  }
+  if (!names.has("execution_direction")) {
+    db.exec(
+      "ALTER TABLE demo2_shadow_override_runs ADD COLUMN execution_direction TEXT",
+    );
+  }
 }
 
 try {
@@ -62,8 +81,9 @@ export function recordDemo2ShadowOverrideMatch(input: {
       `INSERT OR IGNORE INTO demo2_shadow_override_runs (
          evaluation_id, candidate_id, candidate_name, rejected_gate,
          condition_key, condition_value, pair, direction, input_score,
+         execution_mode, original_direction, execution_direction,
          status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'MATCHED', ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MATCHED', ?, ?)`,
     ).run(
       input.evaluationId,
       input.match.candidateId,
@@ -74,6 +94,9 @@ export function recordDemo2ShadowOverrideMatch(input: {
       input.pair,
       input.direction,
       input.inputScore,
+      input.match.executionMode,
+      input.match.originalDirection,
+      input.match.direction,
       now,
       now,
     );
@@ -144,6 +167,9 @@ type SummaryRow = {
   losses: number;
   draws: number;
   totalProfit: number;
+  originalWins: number;
+  originalLosses: number;
+  originalProfit: number;
 };
 
 export type Demo2ActualCandidateClassification =
@@ -161,6 +187,11 @@ function classifyActualCandidate(input: {
 }) {
   const decided = input.wins + input.losses;
   const winRate = decided > 0 ? (input.wins / decided) * 100 : null;
+  const reverseEligible =
+    decided >= 30 &&
+    winRate !== null &&
+    winRate <= 42 &&
+    input.totalProfit < 0;
   if (
     decided >= 50 &&
     winRate !== null &&
@@ -170,6 +201,9 @@ function classifyActualCandidate(input: {
     return {
       classification: "REVERSE_CANDIDATE" as const,
       blocksForwardEntry: true,
+      reverseEligible,
+      decided,
+      winRate,
       reason: "実決着50件以上・勝率42%以下・損益マイナスのため逆方向検証候補",
     };
   }
@@ -182,6 +216,9 @@ function classifyActualCandidate(input: {
     return {
       classification: "GATE_CANDIDATE" as const,
       blocksForwardEntry: true,
+      reverseEligible,
+      decided,
+      winRate,
       reason: "実決着30件以上・損益分岐勝率52.08%未満・損益マイナスのためGate候補",
     };
   }
@@ -194,6 +231,9 @@ function classifyActualCandidate(input: {
     return {
       classification: "PROVEN" as const,
       blocksForwardEntry: false,
+      reverseEligible: false,
+      decided,
+      winRate,
       reason: "実決着50件以上・勝率58%以上・損益プラス",
     };
   }
@@ -201,12 +241,18 @@ function classifyActualCandidate(input: {
     return {
       classification: "COLLECTING" as const,
       blocksForwardEntry: false,
+      reverseEligible: false,
+      decided,
+      winRate,
       reason: `実決着${decided}件。20件までは収集中`,
     };
   }
   return {
     classification: "WATCH" as const,
     blocksForwardEntry: false,
+    reverseEligible: false,
+    decided,
+    winRate,
     reason: "実成績を継続監視中",
   };
 }
@@ -216,9 +262,17 @@ export function getDemo2ActualCandidateDecision(candidateId: string) {
     .prepare(
       `SELECT
          SUM(status = 'SETTLED') AS settled,
-         SUM(status = 'SETTLED' AND (trade_status IN ('WIN','WON') OR profit > 0)) AS wins,
-         SUM(status = 'SETTLED' AND (trade_status IN ('LOST','LOSS') OR profit < 0)) AS losses,
-         ROUND(COALESCE(SUM(CASE WHEN status = 'SETTLED' THEN profit ELSE 0 END), 0), 4) AS totalProfit
+         SUM(status = 'SETTLED' AND (
+           (COALESCE(execution_mode, 'FORWARD') = 'FORWARD' AND (trade_status IN ('WIN','WON') OR profit > 0))
+           OR (execution_mode = 'REVERSE' AND (trade_status IN ('LOST','LOSS') OR profit < 0))
+         )) AS wins,
+         SUM(status = 'SETTLED' AND (
+           (COALESCE(execution_mode, 'FORWARD') = 'FORWARD' AND (trade_status IN ('LOST','LOSS') OR profit < 0))
+           OR (execution_mode = 'REVERSE' AND (trade_status IN ('WIN','WON') OR profit > 0))
+         )) AS losses,
+         ROUND(COALESCE(SUM(CASE
+           WHEN status = 'SETTLED' AND COALESCE(execution_mode, 'FORWARD') = 'REVERSE' THEN -profit
+           WHEN status = 'SETTLED' THEN profit ELSE 0 END), 0), 4) AS totalProfit
        FROM demo2_shadow_override_runs
        WHERE candidate_id = ?`,
     )
@@ -250,7 +304,18 @@ export function getDemo2ShadowOverrideSummary() {
               SUM(status = 'SETTLED' AND (trade_status IN ('WIN','WON') OR profit > 0)) AS wins,
               SUM(status = 'SETTLED' AND (trade_status IN ('LOST','LOSS') OR profit < 0)) AS losses,
               SUM(status = 'SETTLED' AND COALESCE(profit, 0) = 0) AS draws,
-              ROUND(COALESCE(SUM(CASE WHEN status = 'SETTLED' THEN profit ELSE 0 END), 0), 4) AS totalProfit
+              ROUND(COALESCE(SUM(CASE WHEN status = 'SETTLED' THEN profit ELSE 0 END), 0), 4) AS totalProfit,
+              SUM(status = 'SETTLED' AND (
+                (COALESCE(execution_mode, 'FORWARD') = 'FORWARD' AND (trade_status IN ('WIN','WON') OR profit > 0))
+                OR (execution_mode = 'REVERSE' AND (trade_status IN ('LOST','LOSS') OR profit < 0))
+              )) AS originalWins,
+              SUM(status = 'SETTLED' AND (
+                (COALESCE(execution_mode, 'FORWARD') = 'FORWARD' AND (trade_status IN ('LOST','LOSS') OR profit < 0))
+                OR (execution_mode = 'REVERSE' AND (trade_status IN ('WIN','WON') OR profit > 0))
+              )) AS originalLosses,
+              ROUND(COALESCE(SUM(CASE
+                WHEN status = 'SETTLED' AND COALESCE(execution_mode, 'FORWARD') = 'REVERSE' THEN -profit
+                WHEN status = 'SETTLED' THEN profit ELSE 0 END), 0), 4) AS originalProfit
        FROM demo2_shadow_override_runs
        GROUP BY candidate_id, candidate_name, rejected_gate
        ORDER BY matched DESC, candidate_id ASC`,
@@ -260,18 +325,24 @@ export function getDemo2ShadowOverrideSummary() {
     ok: true as const,
     stage: "demo2_shadow_override_summary" as const,
     candidates: rows.map((row) => {
-      const actualDecision = classifyActualCandidate(row);
+      const actualDecision = classifyActualCandidate({
+        settled: row.settled,
+        wins: row.originalWins,
+        losses: row.originalLosses,
+        totalProfit: row.originalProfit,
+      });
       return {
         ...row,
-        entryConversionRate:
-        row.matched > 0
-          ? Math.round((row.buyExecuted / row.matched) * 10000) / 100
-          : null,
-        winRate:
-        row.wins + row.losses > 0
-          ? Math.round((row.wins / (row.wins + row.losses)) * 10000) / 100
-          : null,
         ...actualDecision,
+        originalWinRate: actualDecision.winRate,
+        entryConversionRate:
+          row.matched > 0
+            ? Math.round((row.buyExecuted / row.matched) * 10000) / 100
+            : null,
+        winRate:
+          row.wins + row.losses > 0
+            ? Math.round((row.wins / (row.wins + row.losses)) * 10000) / 100
+            : null,
         remainingToGate: Math.max(0, 30 - (row.wins + row.losses)),
         remainingToReverse: Math.max(0, 50 - (row.wins + row.losses)),
       };

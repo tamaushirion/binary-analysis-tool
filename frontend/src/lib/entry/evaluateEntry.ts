@@ -356,6 +356,7 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
     ? evaluateDemo2ShadowGateOverride({
         demo2Enabled,
         rejectedGate: "engine_skipped_by_empirical_entry_gate",
+        direction: input.direction,
         features: input.features,
       })
     : null;
@@ -451,6 +452,7 @@ export function evaluateEntry(input: EntryEvaluationInput): EntryEvaluationResul
       ? evaluateDemo2ShadowGateOverride({
           demo2Enabled,
           rejectedGate: "engine_skipped_by_feature_win_rate_gate",
+          direction: input.direction,
           features: {
             ...featureSnapshot,
             shadowEntrySpot: input.features?.shadowEntrySpot,
