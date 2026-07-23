@@ -9,6 +9,7 @@ export type Demo2RobustCandidatePreviewCase = {
   id: string;
   name: string;
   expectedCandidateId: Demo2RobustCandidateId | null;
+  expectedExecutionMode?: "FORWARD" | "REVERSE";
   input: Demo2RobustFeatureInput;
   decision: Demo2RobustCandidateDecision;
   passed: boolean;
@@ -34,7 +35,7 @@ const BASE_INPUT: Demo2RobustFeatureInput = {
   highScore: 60,
   lowScore: 60,
   selectedScore: 60,
-  selectedDirection: "HIGH",
+  selectedDirection: "LOW",
   rci9: 0,
   rci26: 0,
   rci52: 0,
@@ -50,6 +51,7 @@ type PreviewCaseDefinition = {
   id: string;
   name: string;
   expectedCandidateId: Demo2RobustCandidateId | null;
+  expectedExecutionMode?: "FORWARD" | "REVERSE";
   input: Demo2RobustFeatureInput;
 };
 
@@ -58,6 +60,7 @@ const TEST_CASES: PreviewCaseDefinition[] = [
     id: "case_hour7_lowscore40_high",
     name: "Hour7・LowScore40安定型",
     expectedCandidateId: "phase16_t_hour7_lowscore40_high",
+    expectedExecutionMode: "REVERSE",
     input: {
       ...BASE_INPUT,
       hour: 7,
@@ -113,6 +116,19 @@ const TEST_CASES: PreviewCaseDefinition[] = [
     },
   },
   {
+    id: "case_high_win_rate_keeps_forward",
+    name: "元方向HIGHの高勝率候補はそのままエントリー",
+    expectedCandidateId: "phase16_t_hour7_lowscore40_high",
+    expectedExecutionMode: "FORWARD",
+    input: {
+      ...BASE_INPUT,
+      selectedDirection: "HIGH",
+      hour: 7,
+      lowScore: 45,
+      highScore: 55,
+    },
+  },
+  {
     id: "case_no_match",
     name: "固定5候補すべて不一致",
     expectedCandidateId: null,
@@ -149,11 +165,17 @@ function evaluateCase(
   const actualCandidateId = decision.allow
     ? decision.match.candidateId
     : null;
+  const actualExecutionMode = decision.allow
+    ? decision.match.executionMode
+    : undefined;
 
   return {
     ...testCase,
     decision,
-    passed: actualCandidateId === testCase.expectedCandidateId,
+    passed:
+      actualCandidateId === testCase.expectedCandidateId &&
+      (testCase.expectedExecutionMode === undefined ||
+        actualExecutionMode === testCase.expectedExecutionMode),
   };
 }
 
