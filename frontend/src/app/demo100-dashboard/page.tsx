@@ -175,6 +175,7 @@ type ShadowGateOverrideCandidate = {
   matched: number;
   postGateRejected: number;
   finalSkipped: number;
+  executionFailed: number;
   buyExecuted: number;
   settled: number;
   monitorFailed: number;
@@ -787,6 +788,7 @@ export default function Demo100DashboardPage() {
                     <th className="py-2">一致</th>
                     <th className="py-2">後段停止</th>
                     <th className="py-2">最終停止</th>
+                    <th className="py-2">実行失敗</th>
                     <th className="py-2">実約定</th>
                     <th className="py-2">約定率</th>
                     <th className="py-2">実勝敗</th>
@@ -801,6 +803,7 @@ export default function Demo100DashboardPage() {
                       <td className="py-3">{item.matched}</td>
                       <td className="py-3">{item.postGateRejected}</td>
                       <td className="py-3">{item.finalSkipped}</td>
+                      <td className="py-3">{item.executionFailed}</td>
                       <td className="py-3">{item.buyExecuted}</td>
                       <td className="py-3">{formatPercent(item.entryConversionRate)}</td>
                       <td className="py-3">
